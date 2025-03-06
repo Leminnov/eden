@@ -1,11 +1,13 @@
 package utils
 
 import (
+	"crypto"
+	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
 	"crypto/ecdsa"
@@ -17,7 +19,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/pem"
-	"io/ioutil"
 	"math/big"
 
 	"github.com/lf-edge/eden/pkg/defaults"
@@ -51,7 +52,7 @@ func genCert(template, parent *x509.Certificate, publicKey *rsa.PublicKey, priva
 	return cert
 }
 
-//GenCARoot gen root CA
+// GenCARoot gen root CA
 func GenCARoot() (*x509.Certificate, *rsa.PrivateKey) {
 	var rootTemplate = x509.Certificate{
 		SerialNumber: big.NewInt(1),
@@ -77,7 +78,7 @@ func GenCARoot() (*x509.Certificate, *rsa.PrivateKey) {
 	return rootCert, priv
 }
 
-//GenServerCertElliptic elliptic cert
+// GenServerCertElliptic elliptic cert
 func GenServerCertElliptic(cert *x509.Certificate, key *rsa.PrivateKey, serial *big.Int, ip []net.IP, dns []string, uuid string) (*x509.Certificate, *ecdsa.PrivateKey) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -106,7 +107,65 @@ func GenServerCertElliptic(cert *x509.Certificate, key *rsa.PrivateKey, serial *
 
 }
 
-//WriteToFiles write cert and key
+// GenServerCertFromPrevCertAndKey generate new signing certificate for the controller using the same signing key and saves it to give path
+func GenServerCertFromPrevCertAndKey(writePath string) error {
+	edenHome, err := DefaultEdenDir()
+	if err != nil {
+		return err
+	}
+
+	// Read root cert
+	rootCert, err := ParseCertificate(filepath.Join(edenHome, defaults.DefaultCertsDist, "root-certificate.pem"))
+	if err != nil {
+		return err
+	}
+
+	// Read root key
+	rootKey, err := ParsePrivateKey(filepath.Join(edenHome, defaults.DefaultCertsDist, "root-certificate-key.pem"))
+	if err != nil {
+		return err
+	}
+
+	// Read server cert
+	oldServerCert, err := ParseCertificate(filepath.Join(edenHome, defaults.DefaultCertsDist, "signing.pem"))
+	if err != nil {
+		return err
+	}
+
+	// Read ecdsa server key
+	serverKeyBytes, err := os.ReadFile(filepath.Join(edenHome, defaults.DefaultCertsDist, "signing-key.pem"))
+	if err != nil {
+		return err
+	}
+	var serverKey *ecdsa.PrivateKey
+	for block, rest := pem.Decode(serverKeyBytes); block != nil; block, rest = pem.Decode(rest) {
+		if block.Type == "EC PRIVATE KEY" {
+			serverKey, err = x509.ParseECPrivateKey(block.Bytes)
+			if err != nil {
+				return err
+			}
+			break
+		}
+	}
+
+	// keep all the same except for dates
+	serverTemplate := *oldServerCert
+	serverTemplate.NotBefore = time.Now().Add(-10 * time.Second)
+	serverTemplate.NotAfter = time.Now().AddDate(10, 0, 0)
+
+	// create new certificate and write it to file
+	serverCert := genCertECDSA(&serverTemplate, rootCert, &serverKey.PublicKey, rootKey)
+	certOut, err := os.Create(writePath)
+	if err != nil {
+		return err
+	}
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: serverCert.Raw}); err != nil {
+		return err
+	}
+	return certOut.Close()
+}
+
+// WriteToFiles write cert and key
 func WriteToFiles(crt *x509.Certificate, key interface{}, certFile string, keyFile string) (err error) {
 	certOut, err := os.Create(certFile)
 	if err != nil {
@@ -156,7 +215,7 @@ func WriteToFiles(crt *x509.Certificate, key interface{}, certFile string, keyFi
 
 // ParseCertificate from file
 func ParseCertificate(certFile string) (*x509.Certificate, error) {
-	cert, err := ioutil.ReadFile(certFile)
+	cert, err := os.ReadFile(certFile)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read file with certificate: %s", err)
 	}
@@ -165,7 +224,7 @@ func ParseCertificate(certFile string) (*x509.Certificate, error) {
 
 // ParsePrivateKey from file
 func ParsePrivateKey(keyFile string) (*rsa.PrivateKey, error) {
-	key, err := ioutil.ReadFile(keyFile)
+	key, err := os.ReadFile(keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read file with private key: %s", err)
 	}
@@ -181,7 +240,7 @@ func ParsePrivateKey(keyFile string) (*rsa.PrivateKey, error) {
 	return privateKey, nil
 }
 
-//ParseFirstCertFromBlock process provided certificate date
+// ParseFirstCertFromBlock process provided certificate date
 func ParseFirstCertFromBlock(b []byte) (*x509.Certificate, error) {
 	certs, err := parseCertFromBlock(b)
 	if err != nil {
@@ -226,7 +285,6 @@ func parsePrivateKey(keyPEMBlock []byte, passCode string) (interface{}, error) {
 				return nil, fmt.Errorf("Error while decrypting the private key block: %v", err)
 			}
 		}
-		log.Println(keyDERBlock.Type)
 		switch keyDERBlock.Type {
 		case "RSA PRIVATE KEY":
 			privatekey, pErr := x509.ParsePKCS1PrivateKey(pvtKeyBytes) //PKCS1 standard
@@ -333,4 +391,37 @@ func calculateSymmetricKeyForEcdhAES(deviceCert, controllerPrivateKey []byte) ([
 		return nil, err
 	}
 	return symmetricKey[:], nil
+}
+
+func computeSignatureWithCertAndKey(shaOfPayload, certPem, keyPem []byte) ([]byte, error) {
+	var signature []byte
+	var rsCombErr error
+
+	cert, err := tls.X509KeyPair(certPem, keyPem)
+	if err != nil {
+		return nil, fmt.Errorf("computeSignatureWithCertAndKey X509KeyPair: %v", err)
+	}
+	switch key := cert.PrivateKey.(type) {
+
+	case *ecdsa.PrivateKey:
+		r, s, err := ecdsa.Sign(rand.Reader, key, shaOfPayload)
+		if err != nil {
+			return nil, err
+		}
+		signature, rsCombErr = rsCombinedBytes(r.Bytes(), s.Bytes(), &key.PublicKey)
+		if rsCombErr != nil {
+			return nil, rsCombErr
+		}
+
+	case *rsa.PrivateKey:
+		var sErr error
+		signature, sErr = rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, shaOfPayload)
+		if sErr != nil {
+			return nil, sErr
+		}
+	default:
+		return nil, fmt.Errorf("signAuthData: privatekey default")
+
+	}
+	return signature, nil
 }

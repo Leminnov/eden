@@ -1,45 +1,51 @@
-# Eclient image v 0.7
+FROM golang:1.18-alpine AS build
 
-FROM ubuntu:focal-20210119
+WORKDIR /go/src/local_manager
+COPY pkg .
 
-ENV DEBIAN_FRONTEND noninteractive
+RUN CGO_ENABLED=0 go build -ldflags "-s -w" -o /out/root/local_manager main.go
 
-RUN apt-get update && apt-get install --no-install-recommends -y \
-  busybox=1:1.30.1-4ubuntu6 \
-  lshw=02.18.85-0.3ubuntu2 \
-  curl=7.68.0-1ubuntu2.5 \
-  iproute2=5.5.0-1ubuntu1 \
-  iputils-ping=3:20190709-3 \
-  mariadb-client=1:10.3.22-1ubuntu1 \
-  net-tools=1.60+git20180626.aebd88e-1ubuntu1 \
-  netcat=1.206-1ubuntu1 \
-  openssh-server=1:8.2p1-4ubuntu0.2 \
-  jq=1.6-1ubuntu0.20.04.1 \
-  setserial=2.17-52 \
-  && apt-get clean \
-  && rm -rf /var/lib/apt/lists/*
+COPY files /out/
+COPY cert/id_rsa* /out/root/.ssh/
+COPY cert/id_rsa.pub /out/root/.ssh/authorized_keys
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-RUN mkdir /var/run/sshd
-RUN echo 'root:adam&eve' | chpasswd
-RUN sed -i 's/#*PermitRootLogin prohibit-password/PermitRootLogin yes/g' /etc/ssh/sshd_config
+FROM alpine:3.16.2
 
-# SSH login fix. Otherwise user is kicked off after login
-RUN sed -i 's@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@g' /etc/pam.d/sshd
+# use patched version of dhcping 1.2-r2+
+# use patched version of sysbench 1.0.20-r1+
+# hadolint ignore=DL3018
+RUN apk add --no-cache lshw \
+    curl \
+    nginx \
+    iproute2 \
+    mysql-client \
+    netcat-openbsd \
+    net-tools \
+    openssh \
+    jq \
+    setserial \
+    avahi \
+    lsblk \
+    tcpdump \
+    iputils && \
+    apk --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/edge/community add -U --upgrade dhcping sysbench
 
-ENV NOTVISIBLE="in users profile"
-RUN echo "export VISIBLE=now" >> /etc/profile
+COPY --from=build /out /
 
-RUN mkdir -p /root/.ssh/
-COPY cert/id_rsa* /root/.ssh/
-COPY cert/id_rsa.pub /root/.ssh/authorized_keys
-RUN chown root:root /root/.ssh/
-RUN chmod 600 /root/.ssh/id_rsa*
-COPY portmap_test.sh /root/portmap_test.sh
-COPY get_eve_ip.sh /root/get_eve_ip.sh
-COPY entrypoint.sh /entrypoint.sh
-COPY reboot /sbin/
-COPY halt /sbin
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
+RUN mkdir -p /mnt && \
+    touch /mnt/profile && \
+    chown root:root /root/.ssh/ && \
+    chmod go-w /root && \
+    chmod 600 /root/.ssh/id_rsa* && \
+    mkdir /var/run/sshd && \
+    mkdir -p /var/www/html && \
+    echo 'root:adam&eve' | chpasswd && \
+    sed -i 's/#*PermitRootLogin prohibit-password/PermitRootLogin yes/g' /etc/ssh/sshd_config && \
+    sed -i 's/#*PubkeyAuthentication yes/PubkeyAuthentication yes/g' /etc/ssh/sshd_config && \
+    sed -i 's/#*PasswordAuthentication yes/PasswordAuthentication yes/g' /etc/ssh/sshd_config && \
+    sed -i 's/#enable-dbus=yes/enable-dbus=no/g' /etc/avahi/avahi-daemon.conf
 
 EXPOSE 22
+EXPOSE 80
 CMD ["/entrypoint.sh"]

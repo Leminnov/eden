@@ -3,23 +3,38 @@ CONFIG ?=
 TESTS ?= $(shell find tests/ -maxdepth 1 -mindepth 1 -type d  -exec basename {} \;)
 DO_DOCKER ?= 1
 
+DOCKER_TARGET ?= load
+DOCKER_PLATFORM ?= $(shell uname -s | tr '[A-Z]' '[a-z]')/$(subst aarch64,arm64,$(subst x86_64,amd64,$(shell uname -m)))
+LINUXKIT_TARGET ?= build
+
 # ESERVER_TAG is the tag for eserver image to build
 ESERVER_TAG ?= "lfedge/eden-http-server"
-# ESERVER_VERSION is the version of eserver image to build
-ESERVER_VERSION ?= "1.4"
 # ESERVER_DIR is the directory with eserver Dockerfile to build
 ESERVER_DIR=$(CURDIR)/eserver
-# check if eserver image already exists in local docker and get its IMAGE_ID
-ifeq ($(DO_DOCKER), 1) # if we need to build eserver
-ESERVER_IMAGE_ID ?= $(shell docker images -q $(ESERVER_TAG):$(ESERVER_VERSION))
-endif
+# ESERVER_VERSION is the version of eserver image to build
+ESERVER_VERSION ?= $(shell git rev-parse --short HEAD:eserver)
 
-# ESERVER_TAG is the tag for processing image to build
-PROCESSING_TAG ?= "itmoeve/eden-processing"
-# PROCESSING_VERSION is the version of processing image to build
-PROCESSING_VERSION ?= "1.2"
+# PROCESSING_TAG is the tag for processing image to build
+PROCESSING_TAG ?= "lfedge/eden-processing"
 # PROCESSING_DIR is the directory with processing Dockerfile to build
 PROCESSING_DIR=$(CURDIR)/processing
+# PROCESSING_VERSION is the version of processing image to build
+PROCESSING_VERSION ?= $(shell git tag -l --contains HEAD)
+ifeq ($(PROCESSING_VERSION),)
+	PROCESSING_VERSION = $(shell git describe --always)
+endif
+
+
+# EDEN_TAG is the tag for eden image to build
+EDEN_TAG ?= "lfedge/eden"
+# EDEN_VERSION is the version of eden image to build
+EDEN_VERSION ?= $(shell git tag -l --contains HEAD)
+ifeq ($(EDEN_VERSION),)
+	EDEN_VERSION = $(shell git describe --always)
+endif
+
+# SDN_DIR is the directory with eden-sdn Dockerfile to build
+SDN_DIR=$(CURDIR)/sdn/vm
 
 # HOSTARCH is the host architecture
 # ARCH is the target architecture
@@ -42,6 +57,7 @@ WORKDIR=$(CURDIR)/dist
 BINDIR := dist/bin
 BIN := eden
 LOCALBIN := $(BINDIR)/$(BIN)-$(OS)-$(ARCH)
+BUILDTOOLS_DIR := $(CURDIR)/build-tools
 EMPTY_DRIVE := $(WORKDIR)/empty
 EMPTY_DRIVE_SIZE := 10M
 
@@ -49,6 +65,10 @@ DIRECTORY_EXPORT ?= $(CURDIR)/export
 
 ZARCH ?= $(HOSTARCH)
 export ZARCH
+
+LINUXKIT=$(BUILDTOOLS_DIR)/linuxkit
+LINUXKIT_VERSION=86cc42bf79fde5bba63519313da337144841b647
+LINUXKIT_SOURCE=https://github.com/linuxkit/linuxkit.git
 
 .DEFAULT_GOAL := help
 
@@ -66,36 +86,46 @@ $(BINDIR):
 $(DIRECTORY_EXPORT):
 	mkdir -p $@
 
-test: build
+$(BUILDTOOLS_DIR):
+	mkdir -p $@
+
+test: build-tests
 	make -C tests TESTS="$(TESTS)" DEBUG=$(DEBUG) ARCH=$(ARCH) OS=$(OS) WORKDIR=$(WORKDIR) test
+
+unit-test:
+	go test $(go list ./... | grep -v /eden/tests/)
 
 # create empty drives to use as additional volumes
 $(EMPTY_DRIVE).%:
 	qemu-img create -f $* $@ $(EMPTY_DRIVE_SIZE)
 
-build-tests: build testbin gotestsum
+build-tests: build testbin
 install: build
 	CGO_ENABLED=0 go install .
 
-build: $(BIN) $(EMPTY_DRIVE).raw $(EMPTY_DRIVE).qcow2 $(EMPTY_DRIVE).qcow $(EMPTY_DRIVE).vmdk $(EMPTY_DRIVE).vhdx
-ifeq ($(ESERVER_IMAGE_ID), ) # if we need to build eserver
-build: $(BIN) $(EMPTY_DRIVE_RAW) $(EMPTY_DRIVE_QCOW2) eserver
-endif
+build: $(BIN) $(EMPTY_DRIVE).raw $(EMPTY_DRIVE).qcow2 $(EMPTY_DRIVE).qcow $(EMPTY_DRIVE).vmdk $(EMPTY_DRIVE).vhdx $(LINUXKIT)
 $(LOCALBIN): $(BINDIR) cmd/*.go pkg/*/*.go pkg/*/*/*.go
 	CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build -ldflags "-s -w" -o $@ .
 	mkdir -p dist/scripts/shell
-	cp shell-scripts/* dist/scripts/shell/
+	cp -r shell-scripts/* dist/scripts/shell/
+
+build-tools: $(LINUXKIT)
+	@echo Done building $<
 
 $(BIN): $(LOCALBIN)
 	ln -sf $(BIN)-$(OS)-$(ARCH) $(BINDIR)/$@
 	ln -sf $(LOCALBIN) $@
 	ln -sf bin/$@ $(WORKDIR)/$@
 
+$(LINUXKIT): $(BUILDTOOLS_DIR)
+	@rm -rf /tmp/linuxkit
+	@git clone $(LINUXKIT_SOURCE) /tmp/linuxkit
+	@cd /tmp/linuxkit && git checkout $(LINUXKIT_VERSION)
+	@cd /tmp/linuxkit/src/cmd/linuxkit && GO111MODULE=on CGO_ENABLED=0 go build -o $@ -mod=vendor .
+	@rm -rf /tmp/linuxkit
+
 testbin: config
 	make -C tests DEBUG=$(DEBUG) ARCH=$(ARCH) OS=$(OS) WORKDIR=$(WORKDIR) build
-
-gotestsum:
-	go get gotest.tools/gotestsum
 
 config: build
 ifeq ($(OS), $(HOSTOS))
@@ -115,15 +145,27 @@ stop: build
 dist: build-tests
 	tar cvzf dist/eden_dist.tgz dist/bin dist/scripts dist/tests dist/*.txt
 
-.PHONY: processing eserver all clean test build build-tests tests-export config setup stop testbin gotestsum dist
+.PHONY: all clean test build build-tests tests-export config setup stop testbin dist
 
-eserver:
-	@echo "Build eserver image"
-	@if [ $(DO_DOCKER) -ne 0 ]; then docker build -t $(ESERVER_TAG):$(ESERVER_VERSION) $(ESERVER_DIR); fi
+push-multi-arch-eserver:
+	@echo "Build and $(DOCKER_TARGET) eserver image $(ESERVER_TAG):$(ESERVER_VERSION)"
+	@docker buildx build --$(DOCKER_TARGET) --platform $(DOCKER_PLATFORM) --tag $(ESERVER_TAG):$(ESERVER_VERSION) $(ESERVER_DIR)
 
-processing:
-	@echo "Build processing image"
-	@if [ $(DO_DOCKER) -ne 0 ]; then docker build -t $(PROCESSING_TAG):$(PROCESSING_VERSION) $(PROCESSING_DIR); fi
+push-multi-arch-eden:
+	@echo "Build and $(DOCKER_TARGET) eden image $(EDEN_TAG):$(EDEN_VERSION)"
+	@docker buildx build --$(DOCKER_TARGET) --platform $(DOCKER_PLATFORM) --tag $(EDEN_TAG):$(EDEN_VERSION) .
+
+push-multi-arch-sdn: $(LINUXKIT)
+	$(eval SDN_TAG = $(shell $(LINUXKIT) pkg show-tag $(SDN_DIR)))
+	@echo "$(LINUXKIT_TARGET) eden-sdn image $(SDN_TAG)"
+	@$(LINUXKIT) pkg $(LINUXKIT_TARGET) --force --platforms $(DOCKER_PLATFORM) --docker --build-yml build.yml $(SDN_DIR)
+
+push-multi-arch-processing:
+	@echo "Build and $(DOCKER_TARGET) processing image $(PROCESSING_TAG):$(PROCESSING_VERSION)"
+	@docker buildx build --$(DOCKER_TARGET) --platform $(DOCKER_PLATFORM) --tag $(PROCESSING_TAG):$(PROCESSING_VERSION) $(PROCESSING_DIR)
+
+build-docker: push-multi-arch-processing push-multi-arch-eserver push-multi-arch-eden push-multi-arch-sdn
+	make -C tests DEBUG=$(DEBUG) ARCH=$(ARCH) OS=$(OS) WORKDIR=$(WORKDIR) DOCKER_TARGET=$(DOCKER_TARGET) DOCKER_PLATFORM=$(DOCKER_PLATFORM) build-docker
 
 tests-export: $(DIRECTORY_EXPORT) build-tests
 	@cp -af $(WORKDIR)/tests/* $(DIRECTORY_EXPORT)
@@ -131,7 +173,19 @@ tests-export: $(DIRECTORY_EXPORT) build-tests
 
 yetus:
 	@echo Running yetus
-	build-tools/src/yetus/test-patch.sh
+	docker run -it --rm -v $(CURDIR):/src:delegated -v /tmp:/tmp apache/yetus:0.14.0 \
+		--basedir=/src \
+		--dirty-workspace \
+		--empty-patch \
+		--plugins=all
+
+validate:
+	@echo Running static validation checks...
+	@echo ...on model files
+	@tar -cf - models/*.json | docker run -i alpine sh -c \
+		'tar xf - && apk add jq >&2 && for i in models/*.json; do echo "$$i" >&2 && jq -r ".logo | to_entries[] | .value" "$$i" || exit 1; done' |\
+		while read logo; do echo "$$logo" ; if [ ! -f models/`basename "$$logo"` ]; then echo "can't find $$logo" && exit 1; fi; done
+
 
 help:
 	@echo "EDEN is the harness for testing EVE and ADAM"
@@ -149,7 +203,8 @@ help:
 	@echo "   stop          stop ADAM and EVE"
 	@echo "   clean         full cleanup of test harness"
 	@echo "   build         build utilities (OS and ARCH options supported, for ex. OS=linux ARCH=arm64)"
-	@echo "   eserver       build eserver image"
+	@echo "   build-docker  build all docker images of EDEN"
+	@echo "   build-tools   build linuxkit (used to build SDN VM)"
 	@echo
 	@echo "You can use some parameters:"
 	@echo "   CONFIG        additional parameters for 'eden config add default', for ex. \"make CONFIG='--devmodel RPi4' run\" or \"make CONFIG='--devmodel GCP' run\""

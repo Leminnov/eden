@@ -35,9 +35,8 @@
       "phylabel": "eth0",
       "assigngrp": "eth0",
       "logicallabel": "eth0",
-      "usagePolicy": {
-        "freeUplink": true
-      },
+      "cost": 0,
+      "usagePolicy": {},
       "phyaddrs": {
         "Ifname": "eth0",
         "PciLong": "0000:01:00.0"
@@ -49,9 +48,8 @@
       "phylabel": "eth1",
       "assigngrp": "eth1",
       "logicallabel": "eth1",
-      "usagePolicy": {
-        "freeUplink": true
-      },
+      "cost": 0,
+      "usagePolicy": {},
       "phyaddrs": {
         "Ifname": "eth1",
         "PciLong": "0000:01:00.1"

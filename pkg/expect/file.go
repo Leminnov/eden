@@ -7,12 +7,12 @@ import (
 	"github.com/lf-edge/eden/pkg/defaults"
 	"github.com/lf-edge/eden/pkg/eden"
 	"github.com/lf-edge/eden/pkg/utils"
-	"github.com/lf-edge/eve/api/go/config"
+	"github.com/lf-edge/eve-api/go/config"
 	uuid "github.com/satori/go.uuid"
 	log "github.com/sirupsen/logrus"
 )
 
-//createImageFile uploads image into EServer from file and calculates size and sha256 of image
+// createImageFile uploads image into EServer from file and calculates size and sha256 of image
 func (exp *AppExpectation) createImageFile(id uuid.UUID, dsID string) *config.Image {
 	server := &eden.EServer{
 		EServerIP:   exp.ctrl.GetVars().EServerIP,
@@ -24,7 +24,7 @@ func (exp *AppExpectation) createImageFile(id uuid.UUID, dsID string) *config.Im
 	status := server.EServerCheckStatus(filepath.Base(exp.appURL))
 	if !status.ISReady || status.Size != utils.GetFileSize(exp.appURL) || status.Sha256 != utils.SHA256SUM(exp.appURL) {
 		log.Infof("Start uploading into eserver of %s", exp.appLink)
-		status = server.EServerAddFile(exp.appURL)
+		status = server.EServerAddFile(exp.appURL, "")
 		if status.Error != "" {
 			log.Error(status.Error)
 		}

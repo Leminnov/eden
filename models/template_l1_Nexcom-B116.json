@@ -6,9 +6,9 @@
     "memory": "1G",
     "storage": "18G",
     "Cpus": "6",
-    "watchdog": true,
-    "hsm": 0,
-    "leds": 1
+    "watchdog": "true",
+    "hsm": "0",
+    "leds": "1"
   },
   "logo": {
     "logo_back":"/workspace/spec/logo_back_Nexcom-B116.png",
@@ -74,9 +74,8 @@
       "usage": 1,
       "phylabel": "eth0",
       "logicallabel": "eth0",
-      "usagePolicy": {
-        "freeUplink": true
-      },
+      "cost": 0,
+      "usagePolicy": {},
       "phyaddrs": {
         "Ifname": "eth0"
       }
@@ -86,9 +85,8 @@
       "usage": 1,
       "phylabel": "eth1",
       "logicallabel": "eth1",
-      "usagePolicy": {
-        "freeUplink": true
-      },
+      "cost": 0,
+      "usagePolicy": {},
       "phyaddrs": {
         "Ifname": "eth1"
       }

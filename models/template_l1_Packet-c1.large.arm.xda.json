@@ -48,9 +48,8 @@
       "phylabel": "eth1",
       "assigngrp": "eth1",
       "logicallabel": "eth1",
-      "usagePolicy": {
-        "freeUplink": true
-      },
+      "cost": 0,
+      "usagePolicy": {},
       "phyaddrs": {
         "Ifname": "eth1"
       }
@@ -61,9 +60,8 @@
       "phylabel": "eth2",
       "assigngrp": "eth2",
       "logicallabel": "eth2",
-      "usagePolicy": {
-        "freeUplink": true
-      },
+      "cost": 0,
+      "usagePolicy": {},
       "phyaddrs": {
         "Ifname": "eth2"
       }
@@ -74,9 +72,8 @@
       "phylabel": "eth3",
       "assigngrp": "eth3",
       "logicallabel": "eth3",
-      "usagePolicy": {
-        "freeUplink": true
-      },
+      "cost": 0,
+      "usagePolicy": {},
       "phyaddrs": {
         "Ifname": "eth3"
       }
@@ -87,9 +84,8 @@
       "phylabel": "eth0",
       "assigngrp": "eth0",
       "logicallabel": "eth0",
-      "usagePolicy": {
-        "freeUplink": true
-      },
+      "cost": 0,
+      "usagePolicy": {},
       "phyaddrs": {
         "Ifname": "eth0"
       }

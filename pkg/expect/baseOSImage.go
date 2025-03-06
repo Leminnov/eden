@@ -2,48 +2,67 @@ package expect
 
 import (
 	"fmt"
-	"github.com/lf-edge/eden/pkg/defaults"
-	"github.com/lf-edge/eden/pkg/utils"
-	"github.com/lf-edge/eve/api/go/config"
-	log "github.com/sirupsen/logrus"
-	"io/ioutil"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/lf-edge/eden/pkg/defaults"
+	"github.com/lf-edge/eden/pkg/utils"
+	"github.com/lf-edge/eve-api/go/config"
+	log "github.com/sirupsen/logrus"
 )
 
-//parse file or url name and returns Base OS Version
+// parse file or url name and returns Base OS Version
 func (exp *AppExpectation) getBaseOSVersion() string {
+	if exp.baseOSVersion != "" {
+		return exp.baseOSVersion
+	}
 	if exp.appType == dockerApp {
 		return exp.appVersion
 	}
 
 	correctionFileName := fmt.Sprintf("%s.ver", exp.appURL)
-	if rootFSFromCorrectionFile, err := ioutil.ReadFile(correctionFileName); err == nil {
+	if rootFSFromCorrectionFile, err := os.ReadFile(correctionFileName); err == nil {
 		return string(rootFSFromCorrectionFile)
 	}
 	rootFSName := path.Base(exp.appURL)
 	rootFSName = strings.TrimSuffix(rootFSName, filepath.Ext(rootFSName))
 	rootFSName = strings.TrimPrefix(rootFSName, "rootfs-")
 	if re := regexp.MustCompile(defaults.DefaultRootFSVersionPattern); !re.MatchString(rootFSName) {
-		log.Fatalf("Filename of rootfs %s does not match pattern %s", rootFSName, defaults.DefaultRootFSVersionPattern)
+		log.Warnf("Filename of rootfs %s does not match pattern %s", rootFSName, defaults.DefaultRootFSVersionPattern)
+		// check for eve_version file
+		if v, err := os.ReadFile(filepath.Join(filepath.Dir(exp.appURL), "eve_version")); err == nil {
+			baseOSVersion := strings.TrimSpace(string(v))
+			log.Warnf("Will use version from eve_version file: %s", baseOSVersion)
+			return baseOSVersion
+		}
+		log.Fatalf("Cannot use provided file: version unknown, please provide it with --os-version flag")
 	}
 	return rootFSName
 }
 
-//checkBaseOSConfig checks if provided BaseOSConfig match expectation
-func (exp *AppExpectation) checkBaseOSConfig(baseOS *config.BaseOSConfig) bool {
+// checkBaseOSConfig checks if provided BaseOSConfig match expectation
+func (exp *AppExpectation) checkBaseOS(baseOS *config.BaseOS) bool {
 	if baseOS == nil {
 		return false
 	}
-	if baseOS.BaseOSVersion == exp.getBaseOSVersion() {
+	return baseOS.BaseOsVersion == exp.getBaseOSVersion()
+}
+
+// checkBaseOSConfig checks if provided BaseOSConfig match expectation
+func (exp *AppExpectation) checkBaseOSConfig(baseOSConfig *config.BaseOSConfig) bool {
+	if baseOSConfig == nil {
+		return false
+	}
+	if baseOSConfig.BaseOSVersion == exp.getBaseOSVersion() {
 		return true
 	}
 	return false
 }
 
-//createBaseOSConfig creates BaseOSConfig with provided img
+// createBaseOSConfig creates BaseOSConfig with provided img
 func (exp *AppExpectation) createBaseOSConfig(img *config.Image) (*config.BaseOSConfig, error) {
 	baseOSConfig := &config.BaseOSConfig{
 		Uuidandversion: &config.UUIDandVersion{
@@ -63,10 +82,11 @@ func (exp *AppExpectation) createBaseOSConfig(img *config.Image) (*config.BaseOS
 	return baseOSConfig, nil
 }
 
-//BaseOSImage expectation gets or creates Image definition,
-//gets BaseOSConfig and returns it or creates BaseOSConfig, adds it into internal controller and returns it
-//if withDrive set will only create drive and content tree
-func (exp *AppExpectation) BaseOSImage(withDrive bool) (baseOSConfig *config.BaseOSConfig) {
+// BaseOSConfig expectation gets or creates BaseOSConfig definition,
+// adds it into internal controller and returns it
+// if version is not empty will use it as BaseOSVersion
+func (exp *AppExpectation) BaseOSConfig(baseOSVersion string) (baseOSConfig *config.BaseOSConfig) {
+	exp.baseOSVersion = baseOSVersion
 	var err error
 	if exp.appType == fileApp {
 		if exp.appURL, err = utils.GetFileFollowLinks(exp.appURL); err != nil {
@@ -93,17 +113,27 @@ func (exp *AppExpectation) BaseOSImage(withDrive bool) (baseOSConfig *config.Bas
 		log.Infof("new base os created %s", baseOSConfig.Uuidandversion.Uuid)
 	}
 
-	// provision content tree and volume in addition to Drive record in config
-	if withDrive && len(baseOSConfig.Drives) == 1 {
-		contentTree := exp.imageToContentTree(image, image.Name)
-		_ = exp.ctrl.AddContentTree(contentTree)
-		exp.device.SetContentTreeConfig(append(exp.device.GetContentTrees(), contentTree.Uuid))
+	return
+}
 
-		volume := exp.driveToVolume(baseOSConfig.Drives[0], 0, contentTree)
-		_ = exp.ctrl.AddVolume(volume)
-		exp.device.SetVolumeConfigs(append(exp.device.GetVolumes(), volume.Uuid))
-
-		baseOSConfig.VolumeID = volume.Uuid
+// BaseOS expectation gets or creates BaseOS definition,
+// adds contentTree into internal controller and returns BaseOS
+// if version is not empty will use it as BaseOSVersion
+func (exp *AppExpectation) BaseOS(baseOSVersion string) (baseOS *config.BaseOS) {
+	exp.baseOSVersion = baseOSVersion
+	var err error
+	if exp.appType == fileApp {
+		if exp.appURL, err = utils.GetFileFollowLinks(exp.appURL); err != nil {
+			log.Fatalf("GetFileFollowLinks: %s", err)
+		}
+	}
+	image := exp.Image()
+	contentTree := exp.imageToContentTree(image, image.Name)
+	_ = exp.ctrl.AddContentTree(contentTree)
+	exp.device.SetContentTreeConfig(append(exp.device.GetContentTrees(), contentTree.Uuid))
+	baseOS = &config.BaseOS{
+		ContentTreeUuid: contentTree.GetUuid(),
+		BaseOsVersion:   exp.getBaseOSVersion(),
 	}
 
 	return

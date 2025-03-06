@@ -9,36 +9,38 @@ import (
 	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/lf-edge/eden/pkg/defaults"
 	"github.com/lf-edge/eden/pkg/utils"
-	"github.com/lf-edge/eve/api/go/config"
-	"github.com/lf-edge/eve/api/go/evecommon"
+	"github.com/lf-edge/eve-api/go/config"
+	"github.com/lf-edge/eve-api/go/evecommon"
 	uuid "github.com/satori/go.uuid"
 	log "github.com/sirupsen/logrus"
 )
 
-//NetInstanceExpectation stores options for create NetworkInstanceConfigs for apps
+// NetInstanceExpectation stores options for create NetworkInstanceConfigs for apps
 type NetInstanceExpectation struct {
-	name          string
-	subnet        string
-	portsReceived []string
-	ports         map[int]int
-	netInstType   string
-	uplinkAdapter string
+	mac              string
+	name             string
+	subnet           string
+	portsReceived    []string
+	ports            map[int]int
+	netInstType      string
+	uplinkAdapter    string
+	staticDNSEntries map[string][]string
+	enableFlowlog    bool
 }
 
-//checkNetworkInstance checks if provided netInst match expectation
+// checkNetworkInstance checks if provided netInst match expectation
 func (exp *AppExpectation) checkNetworkInstance(netInst *config.NetworkInstanceConfig, instanceExpect *NetInstanceExpectation) bool {
 	if netInst == nil {
 		return false
 	}
 	if (netInst.Ip.Subnet != "" && netInst.Ip.Subnet == instanceExpect.subnet) || //if subnet defined and the same
-		(instanceExpect.name != "" && netInst.Displayname == instanceExpect.name) || //if name defined and the same
-		(instanceExpect.netInstType == "switch" && netInst.InstType == config.ZNetworkInstType_ZnetInstSwitch) { //only one switch for now
+		(instanceExpect.name != "" && netInst.Displayname == instanceExpect.name) { // if name defined and the same
 		return true
 	}
 	return false
 }
 
-//createNetworkInstance creates NetworkInstanceConfig for AppExpectation
+// createNetworkInstance creates NetworkInstanceConfig for AppExpectation
 func (exp *AppExpectation) createNetworkInstance(instanceExpect *NetInstanceExpectation) (*config.NetworkInstanceConfig, error) {
 	var netInst *config.NetworkInstanceConfig
 	id, err := uuid.NewV4()
@@ -59,13 +61,13 @@ func (exp *AppExpectation) createNetworkInstance(instanceExpect *NetInstanceExpe
 			Uuid:    id.String(),
 			Version: "1",
 		},
-		InstType: config.ZNetworkInstType_ZnetInstLocal, //we use local networks for now
-		Activate: true,
-		Port:     adapter,
-		Cfg:      &config.NetworkInstanceOpaqueConfig{},
-		IpType:   config.AddressType_IPV4,
-		Ip:       &config.Ipspec{},
-		Dns:      nil,
+		InstType:       config.ZNetworkInstType_ZnetInstLocal, //we use local networks for now
+		Activate:       true,
+		Port:           adapter,
+		Cfg:            &config.NetworkInstanceOpaqueConfig{},
+		IpType:         config.AddressType_IPV4,
+		Ip:             &config.Ipspec{},
+		DisableFlowlog: !instanceExpect.enableFlowlog,
 	}
 	if instanceExpect.netInstType == "switch" {
 		netInst.InstType = config.ZNetworkInstType_ZnetInstSwitch
@@ -82,15 +84,21 @@ func (exp *AppExpectation) createNetworkInstance(instanceExpect *NetInstanceExpe
 		}
 	}
 	if instanceExpect.name == "" {
-		rand.Seed(time.Now().UnixNano())
-		instanceExpect.name = namesgenerator.GetRandomName(0)
+		rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+		instanceExpect.name = namesgenerator.GetRandomName(rnd.Intn(1))
 	}
 	netInst.Displayname = instanceExpect.name
+	for hostname, ipAddrs := range instanceExpect.staticDNSEntries {
+		netInst.Dns = append(netInst.Dns, &config.ZnetStaticDNSEntry{
+			HostName: hostname,
+			Address:  ipAddrs,
+		})
+	}
 	return netInst, nil
 }
 
-//NetworkInstances expects network instances in cloud
-//it iterates over NetworkInstanceConfigs from exp.netInstances, gets or creates new one, if not exists
+// NetworkInstances expects network instances in cloud
+// it iterates over NetworkInstanceConfigs from exp.netInstances, gets or creates new one, if not exists
 func (exp *AppExpectation) NetworkInstances() (networkInstances map[*NetInstanceExpectation]*config.NetworkInstanceConfig) {
 	networkInstances = make(map[*NetInstanceExpectation]*config.NetworkInstanceConfig)
 	for _, ni := range exp.netInstances {
@@ -123,18 +131,19 @@ func (exp *AppExpectation) NetworkInstances() (networkInstances map[*NetInstance
 }
 
 // parseACE returns ACE from string notation
-func parseACE(inp string) *config.ACE {
+func parseACE(ace ACE) *config.ACE {
 	//set default to host
 	aclType := "host"
-	if inp == defaults.DefaultHostOnlyNotation {
+	ep := ace.Endpoint
+	if ep == defaults.DefaultHostOnlyNotation {
 		//special case for host only acl
-		inp = ""
+		ep = ""
 	} else {
-		if _, _, err := net.ParseCIDR(inp); err == nil {
+		if _, _, err := net.ParseCIDR(ep); err == nil {
 			//check if it is subnet
 			aclType = "ip"
 		} else {
-			if ip := net.ParseIP(inp); ip != nil {
+			if ip := net.ParseIP(ep); ip != nil {
 				//check if it is ip
 				aclType = "ip"
 			}
@@ -143,9 +152,12 @@ func parseACE(inp string) *config.ACE {
 	return &config.ACE{
 		Matches: []*config.ACEMatch{{
 			Type:  aclType,
-			Value: inp,
+			Value: ep,
 		}},
 		Dir: config.ACEDirection_BOTH,
+		Actions: []*config.ACEAction{{
+			Drop: ace.Drop,
+		}},
 	}
 }
 
@@ -153,30 +165,22 @@ func parseACE(inp string) *config.ACE {
 func (exp *AppExpectation) getAcls(ni *NetInstanceExpectation) []*config.ACE {
 	var acls []*config.ACE
 	var aclID int32 = 1
-	if exp.acl != nil && len(exp.acl[ni.name]) > 0 {
-		// in case of defined acl allow access only to them
-		for netName, acl := range exp.acl {
-			if netName != "" && netName != ni.name {
-				continue
-			}
-			for _, el := range acl {
-				if el == "" {
-					continue
-				}
-				acl := parseACE(el)
-				if acl != nil {
-					acl.Id = aclID
-					acls = append(acls, acl)
-					aclID++
-				}
+	if _, hasAcls := exp.acl[ni.name]; hasAcls {
+		// explicitly configured ACLs for the network instance
+		for _, acl := range exp.acl[ni.name] {
+			ace := parseACE(acl)
+			if ace != nil {
+				ace.Id = aclID
+				acls = append(acls, ace)
+				aclID++
 			}
 		}
 	} else {
 		// allow access to all addresses
 		aclType := "ip"
 		aclValue := "0.0.0.0/0"
-		if val, ok := exp.acl[""]; ok && val[0] == defaults.DefaultHostOnlyNotation {
-			//special case for host only acl
+		if val := exp.acl[""]; len(val) > 0 && val[0].Endpoint == defaults.DefaultHostOnlyNotation {
+			// special case for host only acl applied for all NIs without explicit ACLs
 			aclType = "host"
 			aclValue = ""
 		}
@@ -210,4 +214,13 @@ func (exp *AppExpectation) getAcls(ni *NetInstanceExpectation) []*config.ACE {
 		}
 	}
 	return acls
+}
+
+// getAccessVID returns Access VLAN ID to assign to the interface between the app
+// and the given network instance.
+func (exp *AppExpectation) getAccessVID(ni *NetInstanceExpectation) uint32 {
+	if exp.vlans == nil {
+		return 0
+	}
+	return uint32(exp.vlans[ni.name])
 }

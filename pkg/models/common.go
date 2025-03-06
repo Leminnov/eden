@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/lf-edge/eden/pkg/defaults"
-	"github.com/lf-edge/eve/api/go/config"
-	"github.com/lf-edge/eve/api/go/evecommon"
+	"github.com/lf-edge/eve-api/go/config"
+	"github.com/lf-edge/eve-api/go/evecommon"
 )
 
 func generateNetworkConfigs(ethCount, wifiCount uint) []*config.NetworkConfig {
@@ -24,10 +24,22 @@ func generateNetworkConfigs(ethCount, wifiCount uint) []*config.NetworkConfig {
 		if ethCount > 1 {
 			networkConfigs = append(networkConfigs,
 				&config.NetworkConfig{
-					Id:   defaults.NetNoDHCPID,
+					Id:   defaults.NetDHCPID2,
 					Type: config.NetworkType_V4,
 					Ip: &config.Ipspec{
 						Dhcp:      config.DHCPType_Client,
+						DhcpRange: &config.IpRange{},
+					},
+					Wireless: nil,
+				})
+		}
+		if ethCount > 2 {
+			networkConfigs = append(networkConfigs,
+				&config.NetworkConfig{
+					Id:   defaults.NetSwitch,
+					Type: config.NetworkType_V4,
+					Ip: &config.Ipspec{
+						Dhcp:      config.DHCPType_DHCPNone,
 						DhcpRange: &config.IpRange{},
 					},
 					Wireless: nil,
@@ -62,7 +74,12 @@ func generateSystemAdapters(ethCount, wifiCount uint) []*config.SystemAdapter {
 		networkUUID := defaults.NetDHCPID
 		if i > 0 {
 			uplink = false
-			networkUUID = defaults.NetNoDHCPID
+		}
+		if i == 1 {
+			networkUUID = defaults.NetDHCPID2
+		}
+		if i == 2 {
+			networkUUID = defaults.NetSwitch
 		}
 		adapters = append(adapters, &config.SystemAdapter{
 			Name:        name,
@@ -79,12 +96,13 @@ func generateSystemAdapters(ethCount, wifiCount uint) []*config.SystemAdapter {
 	}
 	return adapters
 }
+
 func generatePhysicalIOs(ethCount, wifiCount, usbCount uint) []*config.PhysicalIO {
 	var physicalIOs []*config.PhysicalIO
 	for i := uint(0); i < ethCount; i++ {
 		name := fmt.Sprintf("eth%d", i)
 		usage := evecommon.PhyIoMemberUsage_PhyIoUsageMgmtAndApps
-		if i == 0 {
+		if i > 0 {
 			usage = evecommon.PhyIoMemberUsage_PhyIoUsageShared
 		}
 		physicalIOs = append(physicalIOs, &config.PhysicalIO{

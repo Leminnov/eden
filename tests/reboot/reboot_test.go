@@ -4,16 +4,17 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/golang/protobuf/ptypes/timestamp"
 	"github.com/lf-edge/eden/pkg/device"
-	"github.com/lf-edge/eden/pkg/projects"
+	"github.com/lf-edge/eden/pkg/testcontext"
 	"github.com/lf-edge/eden/pkg/tests"
 	"github.com/lf-edge/eden/pkg/utils"
-	"github.com/lf-edge/eve/api/go/info"
+	"github.com/lf-edge/eve-api/go/info"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // This context holds all the configuration items in the same
@@ -31,26 +32,41 @@ tc *TestContext // TestContext is at least {
 */
 
 var (
-	timewait = flag.Duration("timewait", time.Minute, "Timewait for waiting")
+	timewait = flag.Duration("timewait", time.Minute, "Timewait for waiting. Zero value will wait infinite.")
 	reboot   = flag.Bool("reboot", true, "Reboot or not reboot...")
 	count    = flag.Int("count", 1, "Number of reboots")
 
 	number int
 
-	tc *projects.TestContext
+	tc *testcontext.TestContext
 
-	lastRebootTime *timestamp.Timestamp
+	lastRebootTime *timestamppb.Timestamp
 )
 
-func checkReboot(edgeNode *device.Ctx) projects.ProcInfoFunc {
+func checkReboot(t *testing.T, edgeNode *device.Ctx) testcontext.ProcInfoFunc {
 	return func(im *info.ZInfoMsg) error {
 		if im.GetZtype() != info.ZInfoTypes_ZiDevice {
 			return nil
 		}
 		currentLastRebootTime := im.GetDinfo().LastRebootTime
 		if !proto.Equal(lastRebootTime, currentLastRebootTime) {
+			if im.GetDinfo().LastRebootReason == "" &&
+				currentLastRebootTime.AsTime().Unix() == 0 {
+				// device may not fill the info
+				return nil
+			}
 			lastRebootTime = currentLastRebootTime
 			fmt.Printf("rebooted with reason %s at %s/n", im.GetDinfo().LastRebootReason, lastRebootTime.AsTime())
+			if !strings.Contains(im.GetDinfo().LastRebootReason, "NORMAL") {
+				err := fmt.Errorf("abnormal reboot: %s", im.GetDinfo().LastRebootReason)
+				if *reboot {
+					//if we use this test to do reboot, abnormal one must errored the test
+					t.Fatal(err)
+				} else {
+					//if we use this test as detector, abnormal one must end the test
+					return err
+				}
+			}
 			number++
 			if number < *count {
 				if *reboot {
@@ -75,7 +91,7 @@ func TestMain(m *testing.M) {
 
 	tests.TestArgsParse()
 
-	tc = projects.NewTestContext()
+	tc = testcontext.NewTestContext()
 
 	projectName := fmt.Sprintf("%s_%s", "TestReboot", time.Now())
 
@@ -133,6 +149,11 @@ func TestMain(m *testing.M) {
 }
 
 func TestReboot(t *testing.T) {
+
+	if timewait.Seconds() == 0 {
+		timewaitNew := time.Duration(1<<63 - 1)
+		timewait = &timewaitNew
+	}
 	// note that GetEdgeNode() without any argument is
 	// equivalent to the default (first one). Otherwise
 	// one can specify a name GetEdgeNode("foo")
@@ -140,15 +161,19 @@ func TestReboot(t *testing.T) {
 
 	t.Log(utils.AddTimestamp(fmt.Sprintf("Wait for state of %s", edgeNode.GetID())))
 
+	tc.WaitForState(edgeNode, 60)
+
 	t.Log(utils.AddTimestamp(fmt.Sprintf("timewait: %s", timewait)))
 	t.Log(utils.AddTimestamp(fmt.Sprintf("reboot: %t", *reboot)))
 	t.Log(utils.AddTimestamp(fmt.Sprintf("count: %d", *count)))
 
 	lastRebootTime = tc.GetState(edgeNode).GetDinfo().LastRebootTime
 
-	t.Log(utils.AddTimestamp(fmt.Sprintf("lastRebootTime: %s", lastRebootTime.AsTime())))
+	t.Log(utils.AddTimestamp(fmt.Sprintf("LastRebootTime: %s", lastRebootTime.AsTime())))
 
-	tc.AddProcInfo(edgeNode, checkReboot(edgeNode))
+	t.Log(utils.AddTimestamp(fmt.Sprintf("LastRebootReason: %s", tc.GetState(edgeNode).GetDinfo().LastRebootReason)))
+
+	tc.AddProcInfo(edgeNode, checkReboot(t, edgeNode))
 
 	if *reboot {
 		edgeNode.Reboot()

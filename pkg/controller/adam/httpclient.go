@@ -5,19 +5,21 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"github.com/lf-edge/eden/pkg/utils"
-	log "github.com/sirupsen/logrus"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/lf-edge/eden/pkg/utils"
+	log "github.com/sirupsen/logrus"
 )
 
 // http client with correct config
 func (adam *Ctx) getHTTPClient() *http.Client {
 	tlsConfig := &tls.Config{}
 	if adam.serverCA != "" {
-		caCert, err := ioutil.ReadFile(adam.serverCA)
+		caCert, err := os.ReadFile(adam.serverCA)
 		if err != nil {
 			log.Fatalf("unable to read server CA file at %s: %v", adam.serverCA, err)
 		}
@@ -48,12 +50,12 @@ func (adam *Ctx) deleteObj(path string) (err error) {
 	client := adam.getHTTPClient()
 	req, err := http.NewRequest("DELETE", u, nil)
 	if err != nil {
-		log.Fatalf("unable to create new http request: %v", err)
+		return fmt.Errorf("unable to create new http request: %v", err)
 	}
 
 	response, err := utils.RepeatableAttempt(client, req)
 	if err != nil {
-		log.Fatalf("unable to send request: %v", err)
+		return fmt.Errorf("unable to send request: %v", err)
 	}
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("status code: %d", response.StatusCode)
@@ -61,7 +63,7 @@ func (adam *Ctx) deleteObj(path string) (err error) {
 	return nil
 }
 
-func (adam *Ctx) getObj(path string) (out string, err error) {
+func (adam *Ctx) getObj(path string, acceptMime string) (out string, err error) {
 	u, err := utils.ResolveURL(adam.url, path)
 	if err != nil {
 		log.Printf("error constructing URL: %v", err)
@@ -72,12 +74,15 @@ func (adam *Ctx) getObj(path string) (out string, err error) {
 	if err != nil {
 		log.Fatalf("unable to create new http request: %v", err)
 	}
+	if acceptMime != "" {
+		req.Header.Set("Accept", acceptMime)
+	}
 
 	response, err := utils.RepeatableAttempt(client, req)
 	if err != nil {
 		log.Fatalf("unable to send request: %v", err)
 	}
-	buf, err := ioutil.ReadAll(response.Body)
+	buf, err := io.ReadAll(response.Body)
 	if err != nil {
 		log.Printf("unable to read data from URL %s: %v", u, err)
 		return "", err
@@ -85,7 +90,7 @@ func (adam *Ctx) getObj(path string) (out string, err error) {
 	return string(buf), nil
 }
 
-func (adam *Ctx) getList(path string) (out []string, err error) {
+func (adam *Ctx) getList(path string, acceptMime string) (out []string, err error) {
 	u, err := utils.ResolveURL(adam.url, path)
 	if err != nil {
 		log.Printf("error constructing URL: %v", err)
@@ -96,12 +101,15 @@ func (adam *Ctx) getList(path string) (out []string, err error) {
 	if err != nil {
 		log.Fatalf("unable to create new http request: %v", err)
 	}
+	if acceptMime != "" {
+		req.Header.Set("Accept", acceptMime)
+	}
 
 	response, err := utils.RepeatableAttempt(client, req)
 	if err != nil {
 		log.Fatalf("unable to send request: %v", err)
 	}
-	buf, err := ioutil.ReadAll(response.Body)
+	buf, err := io.ReadAll(response.Body)
 	if err != nil {
 		log.Printf("unable to read data from URL %s: %v", u, err)
 		return nil, err
@@ -129,7 +137,7 @@ func (adam *Ctx) postObj(path string, obj []byte, mimeType string) (err error) {
 	return nil
 }
 
-func (adam *Ctx) putObj(path string, obj []byte) (err error) {
+func (adam *Ctx) putObj(path string, obj []byte, mimeType string) (err error) {
 	u, err := utils.ResolveURL(adam.url, path)
 	if err != nil {
 		log.Printf("error constructing URL: %v", err)
@@ -140,6 +148,7 @@ func (adam *Ctx) putObj(path string, obj []byte) (err error) {
 	if err != nil {
 		log.Fatalf("unable to create new http request: %v", err)
 	}
+	req.Header.Set("Content-Type", mimeType)
 	_, err = utils.RepeatableAttempt(client, req)
 	if err != nil {
 		log.Fatalf("unable to send request: %v", err)

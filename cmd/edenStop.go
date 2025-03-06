@@ -1,54 +1,50 @@
 package cmd
 
 import (
-	"fmt"
-	"github.com/lf-edge/eden/pkg/eden"
 	"os"
 	"path/filepath"
 
 	"github.com/lf-edge/eden/pkg/defaults"
-	"github.com/lf-edge/eden/pkg/utils"
+	"github.com/lf-edge/eden/pkg/eden"
+	"github.com/lf-edge/eden/pkg/openevec"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
-var (
-	adamRm    bool
-	eserverRm bool
-)
+func newStopCmd(configName, verbosity *string) *cobra.Command {
+	cfg := &openevec.EdenSetupArgs{}
+	var vmName string
+	var adamRm, registryRm, redisRm, eServerRm bool
 
-var stopCmd = &cobra.Command{
-	Use:   "stop",
-	Short: "stop harness",
-	Long:  `Stop harness.`,
-	PreRunE: func(cmd *cobra.Command, args []string) error {
-		assignCobraToViper(cmd)
-		viperLoaded, err := utils.LoadConfigFile(configFile)
-		if err != nil {
-			return fmt.Errorf("error reading config: %s", err.Error())
-		}
-		if viperLoaded {
-			evePidFile = utils.ResolveAbsPath(viper.GetString("eve.pid"))
-			eveRemote = viper.GetBool("eve.remote")
-			devModel = viper.GetString("eve.devmodel")
-		}
-		return nil
-	},
-	Run: func(cmd *cobra.Command, args []string) {
-		eden.StopEden(adamRm, redisRm, registryRm, eserverRm, eveRemote, evePidFile, devModel, vmName)
-	},
-}
+	var stopCmd = &cobra.Command{
+		Use:               "stop",
+		Short:             "stop harness",
+		Long:              `Stop harness.`,
+		PersistentPreRunE: preRunViperLoadFunction(cfg, configName, verbosity),
+		Run: func(cmd *cobra.Command, args []string) {
+			eden.StopEden(
+				adamRm, redisRm,
+				registryRm, eServerRm,
+				cfg.Eve.Remote, cfg.Eve.Pid,
+				swtpmPidFile(cfg), cfg.Sdn.PidFile,
+				cfg.Eve.DevModel, vmName, cfg.Sdn.Disable,
+			)
+		},
+	}
 
-func stopInit() {
 	currentPath, err := os.Getwd()
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	stopCmd.Flags().BoolVarP(&adamRm, "adam-rm", "", false, "adam rm on stop")
 	stopCmd.Flags().BoolVarP(&registryRm, "registry-rm", "", false, "registry rm on stop")
 	stopCmd.Flags().BoolVarP(&redisRm, "redis-rm", "", false, "redis rm on stop")
-	stopCmd.Flags().BoolVarP(&eserverRm, "eserver-rm", "", false, "eserver rm on stop")
-	stopCmd.Flags().StringVarP(&evePidFile, "eve-pid", "", filepath.Join(currentPath, defaults.DefaultDist, "eve.pid"), "file with EVE pid")
+	stopCmd.Flags().BoolVarP(&eServerRm, "eserver-rm", "", false, "eserver rm on stop")
+	stopCmd.Flags().StringVarP(&cfg.Eve.Pid, "eve-pid", "", filepath.Join(currentPath, defaults.DefaultDist, "eve.pid"), "file with EVE pid")
 	stopCmd.Flags().StringVarP(&vmName, "vmname", "", defaults.DefaultVBoxVMName, "vbox vmname required to create vm")
+
+	addSdnPidOpt(stopCmd, cfg)
+
+	return stopCmd
 }

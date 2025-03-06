@@ -6,7 +6,7 @@ package imports
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,11 +14,19 @@ import (
 	"strings"
 )
 
-//ScanDir process directory
+// ScanDir process directory
 func ScanDir(dir string, tags map[string]bool) ([]string, []string, error) {
-	infos, err := ioutil.ReadDir(dir)
+	allInfos, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, nil, err
+	}
+	infos := make([]fs.FileInfo, 0, len(allInfos))
+	for _, eachDirEntry := range allInfos {
+		info, err := eachDirEntry.Info()
+		if err != nil {
+			return nil, nil, err
+		}
+		infos = append(infos, info)
 	}
 	var files []string
 	for _, info := range infos {
@@ -30,7 +38,7 @@ func ScanDir(dir string, tags map[string]bool) ([]string, []string, error) {
 	return scanFiles(files, tags, false)
 }
 
-//ScanFiles process files
+// ScanFiles process files
 func ScanFiles(files []string, tags map[string]bool) ([]string, []string, error) {
 	return scanFiles(files, tags, true)
 }
@@ -86,7 +94,7 @@ Files:
 	return keys(imports), keys(testImports), nil
 }
 
-//ErrNoGo no go files found
+// ErrNoGo no go files found
 var ErrNoGo = fmt.Errorf("no Go source files")
 
 func keys(m map[string]bool) []string {

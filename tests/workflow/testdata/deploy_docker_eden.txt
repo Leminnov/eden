@@ -3,7 +3,7 @@
 [!exec:grep] stop
 
 # Fail if reboot
-! test eden.reboot.test -test.v -timewait 10m -reboot=0 -count=1 &
+! test eden.reboot.test -test.v -timewait=0 -reboot=0 -count=1 &
 
 eden pod deploy -p 8028:80 docker://nginx
 stdout 'deploy pod .* with docker://nginx request sent'
@@ -30,9 +30,7 @@ EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "ede
 
 $EDEN pod ps | grep nginx || exit
 
-URL=`$EDEN pod ps | grep nginx | awk '{print $4}'`
-
-test -n "$URL" && until curl $URL | grep 'Welcome to nginx'; do sleep 3; done
+until $EDEN sdn fwd eth0 8028 -- curl FWD_IP:FWD_PORT | grep 'Welcome to nginx'; do sleep 3; done
 
 -- del_dckr.sh --
 #!/bin/bash

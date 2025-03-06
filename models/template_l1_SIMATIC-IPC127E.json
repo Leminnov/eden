@@ -4,9 +4,9 @@
     "memory": "4G",
     "storage": "32G",
     "Cpus": "4",
-    "hsm": 1,
-    "leds": 3,
-    "watchdog": true
+    "hsm": "1",
+    "leds": "3",
+    "watchdog": "true"
   },"logo": {
     "logo_back": "/workspace/spec/logo_back_SIMATIC-IPC127E.png",
     "logo_front": "/workspace/spec/logo_front_SIMATIC-IPC127E.png"
@@ -22,9 +22,8 @@
         "PciLong": "0000:01:00.0"
       },
       "logicallabel": "eth0",
-      "usagePolicy": {
-        "freeUplink": true
-      }
+      "cost": 0,
+      "usagePolicy": {}
     },
     {
       "ztype": 1,
@@ -35,9 +34,8 @@
         "PciLong": "0000:02:00.0"
       },
       "logicallabel": "eth1",
-      "usagePolicy": {
-        "freeUplink": true
-      }
+      "cost": 0,
+      "usagePolicy": {}
     },
     {
       "ztype": 1,
@@ -48,9 +46,8 @@
         "PciLong": "0000:03:00.0"
       },
       "logicallabel": "eth2",
-      "usagePolicy": {
-        "freeUplink": true
-      }
+      "cost": 0,
+      "usagePolicy": {}
     },
     {
       "ztype": 2,

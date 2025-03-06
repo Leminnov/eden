@@ -20,9 +20,8 @@
             "ifname": "wlan0"
         },
         "logicallabel": "wlan0",
-        "usagePolicy": {
-            "freeUplink": true
-        }
+        "cost": 0,
+        "usagePolicy": {}
     }
     ]
 }

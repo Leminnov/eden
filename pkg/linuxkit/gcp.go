@@ -5,7 +5,6 @@ import (
 	"crypto/rsa"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"strings"
@@ -24,6 +23,7 @@ import (
 
 const pollingInterval = time.Second
 const timeout = 60
+const nested = true
 
 // GCPClient contains state required for communication with GCP
 type GCPClient struct {
@@ -49,7 +49,7 @@ func NewGCPClient(keys, projectName string) (*GCPClient, error) {
 			return nil, err
 		}
 
-		jsonKey, err := ioutil.ReadAll(f)
+		jsonKey, err := io.ReadAll(f)
 		if err != nil {
 			return nil, err
 		}
@@ -139,8 +139,8 @@ func (g GCPClient) RemoveFile(file, bucketName string) error {
 	return nil
 }
 
-// CreateImage creates a GCP image using the a source from Google Storage
-func (g GCPClient) CreateImage(name, storageURL, family string, nested, replace bool) error {
+// CreateImage creates a GCP image using the source from Google Storage
+func (g GCPClient) CreateImage(name, storageURL, family string, uefi, replace bool) error {
 	if replace {
 		if err := g.DeleteImage(name); err != nil {
 			return err
@@ -161,6 +161,12 @@ func (g GCPClient) CreateImage(name, storageURL, family string, nested, replace 
 
 	if nested {
 		imgObj.Licenses = []string{"projects/vm-options/global/licenses/enable-vmx"}
+	}
+
+	if uefi {
+		imgObj.GuestOsFeatures = []*compute.GuestOsFeature{
+			{Type: "UEFI_COMPATIBLE"},
+		}
 	}
 
 	op, err := g.compute.Images.Insert(g.projectName, imgObj).Do()
@@ -224,7 +230,7 @@ func (g GCPClient) ListImages() ([]string, error) {
 }
 
 // CreateInstance creates and starts an instance on GCP
-func (g GCPClient) CreateInstance(name, image, zone, machineType string, disks Disks, data *string, nested, replace bool) error {
+func (g GCPClient) CreateInstance(name, image, zone, machineType string, disks Disks, data *string, vtpm, replace bool) error {
 	if replace {
 		if err := g.DeleteInstance(name, zone, true); err != nil {
 			return err
@@ -266,7 +272,16 @@ func (g GCPClient) CreateInstance(name, image, zone, machineType string, disks D
 		} else {
 			diskSizeGb = int64(convertMBtoGB(disk.Size))
 		}
-		diskOp, err := g.compute.Disks.Insert(g.projectName, zone, &compute.Disk{Name: diskName, SizeGb: diskSizeGb}).Do()
+		disk := &compute.Disk{Name: diskName, SizeGb: diskSizeGb}
+		if vtpm {
+			disk.GuestOsFeatures = []*compute.GuestOsFeature{
+				{Type: "UEFI_COMPATIBLE"},
+			}
+		}
+		diskOp, err := g.compute.Disks.Insert(g.projectName, zone, disk).Do()
+		if err != nil {
+			return err
+		}
 		if err != nil {
 			return err
 		}
@@ -311,10 +326,12 @@ func (g GCPClient) CreateInstance(name, image, zone, machineType string, disks D
 			},
 		},
 	}
-
 	if nested {
 		// TODO(rn): We could/should check here if the image has nested virt enabled
 		instanceObj.MinCpuPlatform = "Intel Skylake"
+	}
+	if vtpm {
+		instanceObj.ShieldedInstanceConfig = &compute.ShieldedInstanceConfig{EnableVtpm: true}
 	}
 	op, err := g.compute.Instances.Insert(g.projectName, zone, instanceObj).Do()
 	if err != nil {
@@ -391,7 +408,7 @@ func (g GCPClient) ConnectToInstanceSerialPort(instance, zone string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
@@ -568,7 +585,7 @@ func (g GCPClient) GetInstanceNatIP(instance, zone string) (string, error) {
 }
 
 // SetFirewallAllowRule runs
-//gcloud compute firewall-rules create ruleName --allow all --source-ranges=sourceRanges --priority=priority
+// gcloud compute firewall-rules create ruleName --allow all --source-ranges=sourceRanges --priority=priority
 func (g GCPClient) SetFirewallAllowRule(ruleName string, priority int64, sourceRanges []string) error {
 	log.Infof("setting firewall %s for %s", ruleName, sourceRanges)
 	for i := 0; i < timeout; i++ {

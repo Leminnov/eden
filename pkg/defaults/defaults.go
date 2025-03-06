@@ -7,7 +7,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-//directories and files
+// directories and files
 const (
 	DefaultDist             = "dist"             //root directory
 	DefaultImageDist        = "images"           //directory for images inside dist
@@ -19,6 +19,7 @@ const (
 	DefaultCertsDist        = "certs"            //directory for certs inside dist
 	DefaultBinDist          = "bin"              //directory for binaries inside dist
 	DefaultEdenHomeDir      = ".eden"            //directory inside HOME directory for configs
+	DefaultBuildtoolsDir    = "build-tools"      //directory to store tools needed for building (e.g. linuxkit)
 	DefaultCurrentDirConfig = "eden-config.yml"  //file for search config in current directory
 	DefaultContextFile      = "context.yml"      //file for saving current context inside DefaultEdenHomeDir
 	DefaultContextDirectory = "contexts"         //directory for saving contexts inside DefaultEdenHomeDir
@@ -26,6 +27,8 @@ const (
 	DefaultSSHKey           = "certs/id_rsa.pub" //file for save ssh key
 	DefaultConfigHidden     = ".eden-config.yml" //file to save config get --all
 	DefaultConfigSaved      = "config_saved.yml" //file to save config during 'eden setup'
+	DefaultSwtpmSockFile    = "swtpm-sock"       //file to communicate with swtpm
+	DefaultAdditionalDisks  = 0                  //number of disks to use alongside with bootable one
 
 	DefaultContext = "default" //default context name
 
@@ -33,43 +36,53 @@ const (
 	DefaultTestArgsEnv = "EDEN_TEST_ARGS" //default env for test arguments
 )
 
-//domains, ips, ports
+// domains, ips, ports
 const (
-	DefaultDomain       = "mydomain.adam"
-	DefaultIP           = "192.168.0.1"
-	DefaultEVEIP        = "192.168.1.2"
-	DefaultEserverPort  = 8888
-	DefaultTelnetPort   = 7777
-	DefaultSSHPort      = 2222
-	DefaultEVEHost      = "127.0.0.1"
-	DefaultRedisHost    = "localhost"
-	DefaultRedisPort    = 6379
-	DefaultAdamPort     = 3333
-	DefaultRegistryPort = 5000
+	DefaultDomain               = "mydomain.adam"
+	DefaultIP                   = "192.168.0.1"
+	DefaultEVEIP                = "192.168.1.2"
+	DefaultEserverPort          = 8888
+	DefaultTelnetPort           = 17777
+	DefaultQemuMonitorPort      = 7788
+	DefaultQemuNetdevSocketPort = 7790
+	DefaultSSHPort              = 2222
+	DefaultEVEHost              = "127.0.0.1"
+	DefaultRedisHost            = "localhost"
+	DefaultRedisPort            = 6379
+	DefaultAdamPort             = 3333
+	DefaultRegistryPort         = 5050
 
 	//tags, versions, repos
-	DefaultEVETag               = "6.5.0" //DefaultEVETag tag for EVE image
-	DefaultAdamTag              = "0.0.22"
-	DefaultRedisTag             = "6"
+	DefaultEVETag               = "13.7.0" // DefaultEVETag tag for EVE image
+	DefaultAdamTag              = "0.0.57"
+	DefaultRedisTag             = "7"
 	DefaultRegistryTag          = "2.7"
-	DefaultProcTag              = "1.2"
+	DefaultProcTag              = "83cfe07"
+	DefaultMkimageTag           = "8.5.0"
 	DefaultImage                = "library/alpine"
 	DefaultAdamContainerRef     = "lfedge/adam"
 	DefaultRedisContainerRef    = "redis"
 	DefaultRegistryContainerRef = "library/registry"
-	DefaultProcContainerRef     = "itmoeve/eden-processing"
+	DefaultProcContainerRef     = "lfedge/eden-processing"
+	DefaultMkimageContainerRef  = "lfedge/eve-mkimage-raw-efi"
+	DefaultEdenSDNContainerRef  = "lfedge/eden-sdn"
 	DefaultEveRepo              = "https://github.com/lf-edge/eve.git"
-	DefaultEveRegistry          = "lfedge"
+	DefaultEveRegistry          = "lfedge/eve"
 	DefaultRegistry             = "docker.io"
 
 	DefaultSFTPUser      = "user"
 	DefaultSFTPPassword  = "password"
 	DefaultSFTPDirPrefix = "/eserver/run"
 
+	DefaultEVEPlatform = "none"
+
 	DefaultRedisPasswordFile = "redis.pass"
 
-	DefaultEServerTag          = "1.4"
+	DefaultEServerTag          = "4b71e2c"
 	DefaultEServerContainerRef = "lfedge/eden-http-server"
+
+	DefaultEClientTag          = "b1c1de6"
+	DefaultEClientContainerRef = "lfedge/eden-eclient"
 
 	//DefaultRepeatCount is repeat count for requests
 	DefaultRepeatCount = 20
@@ -80,16 +93,17 @@ const (
 	DefaultIsLocal               = false
 	DefaultEVEHV                 = "kvm"
 	DefaultCpus                  = 4
-	DefaultMemory                = 4096
+	DefaultMemory                = 8192
 	DefaultEVESerial             = "31415926"
 	NetDHCPID                    = "6822e35f-c1b8-43ca-b344-0bbc0ece8cf1"
-	NetNoDHCPID                  = "6822e35f-c1b8-43ca-b344-0bbc0ece8cf2"
+	NetDHCPID2                   = "6822e35f-c1b8-43ca-b344-0bbc0ece8cf2"
 	NetWiFiID                    = "6822e35f-c1b8-43ca-b344-0bbc0ece8cf3"
-	DefaultTestProg              = ""
+	NetSwitch                    = "6822e35f-c1b8-43ca-b344-0bbc0ece8cf4"
+	DefaultTestProg              = "eden.escript.test"
 	DefaultTestScenario          = ""
 	DefaultRootFSVersionPattern  = `^.*-(xen|kvm|acrn|rpi|rpi-xen|rpi-kvm)-(amd64|arm64)$`
 	DefaultControllerModePattern = `^(?P<Type>(file|proto|adam|zedcloud)):\/\/(?P<URL>.*)$`
-	DefaultPodLinkPattern        = `^(?P<TYPE>(oci|docker|http[s]{0,1}|file)):\/\/(?P<TAG>[^:]+):*(?P<VERSION>.*)$`
+	DefaultPodLinkPattern        = `^(?P<TYPE>(oci|docker|http[s]{0,1}|file|directory)):\/\/(?P<TAG>[^:]+):*(?P<VERSION>.*)$`
 	DefaultRedisContainerName    = "eden_redis"
 	DefaultAdamContainerName     = "eden_adam"
 	DefaultRegistryContainerName = "eden_registry"
@@ -97,22 +111,24 @@ const (
 	DefaultDockerNetworkName     = "eden_network"
 	DefaultLogLevelToPrint       = log.InfoLevel
 	DefaultX509Country           = "RU"
-	DefaultX509Company           = "Itmo"
+	DefaultX509Company           = "lf-edge"
 	DefaultAppsLogsRedisPrefix   = "APPS_EVE_"
 	DefaultLogsRedisPrefix       = "LOGS_EVE_"
 	DefaultInfoRedisPrefix       = "INFO_EVE_"
 	DefaultMetricsRedisPrefix    = "METRICS_EVE_"
 	DefaultRequestsRedisPrefix   = "REQUESTS_EVE_"
+	DefaultFlowLogRedisPrefix    = "FLOW_MESSAGE_EVE_"
 
-	DefaultEveLogLevel  = "info"    //min level of logs saved in files on EVE device
-	DefaultAdamLogLevel = "warning" //min level of logs sent from EVE to Adam
+	DefaultEveLogLevel  = "info" // min level of logs saved in files on EVE device
+	DefaultAdamLogLevel = "info" // min level of logs sent from EVE to Adam
 
-	DefaultQemuAccelDarwin     = "-machine q35,accel=hvf -cpu kvm64,kvmclock=off "
-	DefaultQemuAccelLinuxAmd64 = "-machine q35,accel=kvm,dump-guest-core=off,kernel-irqchip=split -cpu host,invtsc=on,kvmclock=off -device intel-iommu,intremap=on,caching-mode=on,aw-bits=48 "
-	DefaultQemulAmd64          = "-machine q35 --cpu SandyBridge "
+	DefaultQemuAccelDarwin      = "-machine q35,accel=hvf -cpu kvm64,kvmclock=off "
+	DefaultQemuAccelDarwinArm64 = "-machine virt,accel=hvf,usb=off,dump-guest-core=off -cpu host "
+	DefaultQemuAccelLinuxAmd64  = "-machine q35,accel=kvm,dump-guest-core=off,kernel-irqchip=split -cpu host,invtsc=on,kvmclock=off -device intel-iommu,intremap=on,caching-mode=on,aw-bits=48 "
+	DefaultQemuAmd64            = "-machine q35,smm=on --cpu SandyBridge "
 
 	DefaultQemuAccelArm64 = "-machine virt,accel=kvm,usb=off,dump-guest-core=off -cpu host "
-	DefaultQemulArm64     = "-machine virt,virtualization=true -cpu cortex-a57 "
+	DefaultQemuArm64      = "-machine virt,virtualization=true -cpu cortex-a57 "
 
 	DefaultAppSubnet        = "10.11.12.0/24"
 	DefaultHostOnlyNotation = "host-only-acl"
@@ -137,6 +153,8 @@ const (
 
 	DefaultEVEImageSize = 8192
 
+	DefaultTPMEnabled = false
+
 	DefaultAppMem = 1024000
 	DefaultAppCPU = 1
 
@@ -157,8 +175,15 @@ const (
 	DefaultGcpBucketName   = "eve-live"
 	DefaultGcpProjectName  = "lf-edge-eve"
 	DefaultGcpZone         = "us-west1-a"
-	DefaultGcpMachineType  = "n1-highcpu-4"
+	DefaultGcpMachineType  = "n1-standard-2" // 2 vCPU 7.5 GB RAM
 	DefaultGcpRulePriority = 10
+
+	//defaults for packet
+
+	DefaultVMName            = "eden-packet-test"
+	DefaultPacketProjectName = "Zededa"
+	DefaultPacketZone        = "sjc1"
+	DefaultPacketMachineType = "t1.small.x86"
 
 	//default for VBox
 
@@ -169,74 +194,16 @@ const (
 	DefaultPerfEVELocation       = "/persist/perf.data"
 	DefaultPerfScriptEVELocation = "/persist/perf.script.out"
 	DefaultHWEVELocation         = "/persist/lshw.out"
+
+	//defaults for SDN
+	DefaultSdnTelnetPort = 6623
+	DefaultSdnSSHPort    = 6622
+	DefaultSdnMgmtPort   = 6666
+	DefaultSdnCpus       = 2
+	DefaultSdnMemory     = 2048
 )
 
 var (
 	//DefaultQemuHostFwd represents port forward for ssh
 	DefaultQemuHostFwd = map[string]string{strconv.Itoa(DefaultSSHPort): "22"}
-	//DefaultCobraToViper represents mapping values between cobra (cli) and viper (yml)
-	DefaultCobraToViper = map[string]string{
-		"redis.dist":  "redis-dist",
-		"redis.tag":   "redis-tag",
-		"redis.port":  "redis-port",
-		"redis.force": "redis-force",
-
-		"adam.dist":         "adam-dist",
-		"adam.tag":          "adam-tag",
-		"adam.port":         "adam-port",
-		"adam.domain":       "domain",
-		"adam.ip":           "ip",
-		"adam.eve-ip":       "eve-ip",
-		"adam.force":        "adam-force",
-		"adam.v1":           "api-v1",
-		"adam.redis.adam":   "adam-redis-url",
-		"adam.remote.redis": "adam-redis",
-
-		"registry.tag":  "registry-tag",
-		"registry.port": "registry-port",
-		"registry.dist": "registry-dist",
-
-		"eve.arch":         "eve-arch",
-		"eve.os":           "eve-os",
-		"eve.accel":        "eve-accel",
-		"eve.hv":           "eve-hv",
-		"eve.serial":       "eve-serial",
-		"eve.pid":          "eve-pid",
-		"eve.log":          "eve-log",
-		"eve.firmware":     "eve-firmware",
-		"eve.repo":         "eve-repo",
-		"eve.registry":     "eve-registry",
-		"eve.tag":          "eve-tag",
-		"eve.uefi-tag":     "eve-uefi-tag",
-		"eve.hostfwd":      "eve-hostfwd",
-		"eve.dist":         "eve-dist",
-		"eve.base-dist":    "eve-base-dist",
-		"eve.qemu-config":  "qemu-config",
-		"eve.uuid":         "uuid",
-		"eve.image-file":   "image-file",
-		"eve.dtb-part":     "dtb-part",
-		"eve.config-part":  "config-part",
-		"eve.base-version": "os-version",
-		"eve.devmodel":     "devmodel",
-		"eve.devmodelfile": "devmodel-file",
-		"eve.telnet-port":  "eve-telnet-port",
-
-		"eden.images.dist":   "image-dist",
-		"eden.images.docker": "docker-yml",
-		"eden.images.vm":     "vm-yml",
-		"eden.download":      "download",
-		"eden.eserver.ip":    "eserver-ip",
-		"eden.eserver.port":  "eserver-port",
-		"eden.eserver.tag":   "eserver-tag",
-		"eden.eserver.force": "eserver-force",
-		"eden.certs-dist":    "certs-dist",
-		"eden.bin-dist":      "bin-dist",
-		"eden.ssh-key":       "ssh-key",
-		"eden.test-bin":      "prog",
-		"eden.test-scenario": "scenario",
-
-		"gcp.key": "key",
-
-		"config": "config",
-	}
 )

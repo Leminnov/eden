@@ -1,156 +1,122 @@
 package cmd
 
 import (
-	"fmt"
-
-	"github.com/lf-edge/eden/pkg/defaults"
-	"github.com/lf-edge/eden/pkg/eve"
-	"github.com/lf-edge/eden/pkg/expect"
-	"github.com/lf-edge/eden/pkg/utils"
+	"github.com/lf-edge/eden/pkg/controller/types"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
+	"github.com/thediveo/enumflag"
 )
 
-var (
-	networkType string
-	networkName string
-	uplinkAdapter string
-)
+func newNetworkCmd() *cobra.Command {
+	var networkCmd = &cobra.Command{
+		Use: "network",
+	}
 
-var networkCmd = &cobra.Command{
-	Use: "network",
+	groups := CommandGroups{
+		{
+			Message: "Basic Commands",
+			Commands: []*cobra.Command{
+				newNetworkLsCmd(),
+				newNetworkDeleteCmd(),
+				newNetworkNetstatCmd(),
+				newNetworkCreateCmd(),
+			},
+		},
+	}
+
+	groups.AddTo(networkCmd)
+
+	return networkCmd
 }
 
-//networkLsCmd is a command to list deployed network instances
-var networkLsCmd = &cobra.Command{
-	Use:   "ls",
-	Short: "List networks",
-	PreRunE: func(cmd *cobra.Command, args []string) error {
-		assignCobraToViper(cmd)
-		_, err := utils.LoadConfigFile(configFile)
-		if err != nil {
-			return fmt.Errorf("error reading config: %s", err.Error())
-		}
-		devModel = viper.GetString("eve.devmodel")
-		qemuPorts = viper.GetStringMapString("eve.hostfwd")
-		return nil
-	},
-	Run: func(cmd *cobra.Command, args []string) {
-		changer := &adamChanger{}
-		ctrl, dev, err := changer.getControllerAndDev()
-		if err != nil {
-			log.Fatalf("getControllerAndDev: %s", err)
-		}
-		state := eve.Init(ctrl, dev)
-		if err := ctrl.InfoLastCallback(dev.GetID(), nil, state.InfoCallback()); err != nil {
-			log.Fatalf("fail in get InfoLastCallback: %s", err)
-		}
-		if err := ctrl.MetricLastCallback(dev.GetID(), nil, state.MetricCallback()); err != nil {
-			log.Fatalf("fail in get MetricLastCallback: %s", err)
-		}
-		if err := state.NetList(); err != nil {
-			log.Fatal(err)
-		}
-	},
+func newNetworkLsCmd() *cobra.Command {
+	var outputFormat types.OutputFormat
+	//networkLsCmd is a command to list deployed network instances
+	var networkLsCmd = &cobra.Command{
+		Use:   "ls",
+		Short: "List networks",
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := openEVEC.NetworkLs(outputFormat); err != nil {
+				log.Fatal(err)
+			}
+		},
+	}
+	networkLsCmd.Flags().Var(
+		enumflag.New(&outputFormat, "format", outputFormatIds, enumflag.EnumCaseInsensitive),
+		"format",
+		"Format to print logs, supports: lines, json")
+	return networkLsCmd
 }
 
-//networkDeleteCmd is a command to delete network instance from EVE
-var networkDeleteCmd = &cobra.Command{
-	Use:   "delete <name>",
-	Short: "Delete network",
-	Args:  cobra.ExactArgs(1),
-	PreRunE: func(cmd *cobra.Command, args []string) error {
-		assignCobraToViper(cmd)
-		_, err := utils.LoadConfigFile(configFile)
-		if err != nil {
-			return fmt.Errorf("error reading config: %s", err.Error())
-		}
-		return nil
-	},
-	Run: func(cmd *cobra.Command, args []string) {
-		niName := args[0]
-		changer := &adamChanger{}
-		ctrl, dev, err := changer.getControllerAndDev()
-		if err != nil {
-			log.Fatalf("getControllerAndDev: %s", err)
-		}
-		for id, el := range dev.GetNetworkInstances() {
-			ni, err := ctrl.GetNetworkInstanceConfig(el)
-			if err != nil {
-				log.Fatalf("no network in cloud %s: %s", el, err)
+func newNetworkDeleteCmd() *cobra.Command {
+	//networkDeleteCmd is a command to delete network instance from EVE
+	var networkDeleteCmd = &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Delete network",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			niName := args[0]
+			if err := openEVEC.NetworkDelete(niName); err != nil {
+				log.Fatal(err)
 			}
-			if ni.Displayname == niName {
-				configs := dev.GetNetworkInstances()
-				utils.DelEleInSlice(&configs, id)
-				dev.SetNetworkInstanceConfig(configs)
-				if err = changer.setControllerAndDev(ctrl, dev); err != nil {
-					log.Fatalf("setControllerAndDev: %s", err)
-				}
-				log.Infof("network %s delete done", niName)
-				return
-			}
-		}
-		log.Infof("not found network with name %s", niName)
-	},
+		},
+	}
+	return networkDeleteCmd
 }
 
-//networkCreateCmd is command for create network instance in EVE
-var networkCreateCmd = &cobra.Command{
-	Use:   "create [subnet]",
-	Short: "Create network instance in EVE",
-	Args:  cobra.RangeArgs(0, 1),
-	PreRunE: func(cmd *cobra.Command, args []string) error {
-		assignCobraToViper(cmd)
-		_, err := utils.LoadConfigFile(configFile)
-		if err != nil {
-			return fmt.Errorf("error reading config: %s", err.Error())
-		}
-		ssid = viper.GetString("eve.ssid")
-		return nil
-	},
-	Run: func(cmd *cobra.Command, args []string) {
-		if networkType != "local" && networkType != "switch" {
-			log.Fatalf("Network type %s not supported now", networkType)
-		}
-		subnet := ""
-		if networkType == "local" {
-			if len(args) != 1 {
-				log.Fatal("You must define subnet as first arg for local network")
+func newNetworkNetstatCmd() *cobra.Command {
+	var outputTail uint
+	var outputFormat types.OutputFormat
+
+	//networkNetstatCmd is a command to show netstat for network
+	var networkNetstatCmd = &cobra.Command{
+		Use:   "netstat <name>",
+		Short: "Show netstat for network",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			niName := args[0]
+			if err := openEVEC.NetworkNetstat(niName, outputFormat, outputTail); err != nil {
+				log.Fatal(err)
 			}
-			subnet = args[0]
-		}
-		changer := &adamChanger{}
-		ctrl, dev, err := changer.getControllerAndDev()
-		if err != nil {
-			log.Fatalf("getControllerAndDev: %s", err)
-		}
-		var opts []expect.ExpectationOption
-		opts = append(opts, expect.AddNetInstanceAndPortPublish(subnet, networkType, networkName, nil, uplinkAdapter))
-		expectation := expect.AppExpectationFromURL(ctrl, dev, defaults.DefaultDummyExpect, podName, opts...)
-		netInstancesConfigs := expectation.NetworkInstances()
-	mainloop:
-		for _, el := range netInstancesConfigs {
-			for _, element := range dev.GetNetworkInstances() {
-				if element == el.Uuidandversion.Uuid {
-					log.Infof("network with defined parameters already exists")
-					continue mainloop
-				}
-			}
-			dev.SetNetworkInstanceConfig(append(dev.GetNetworkInstances(), el.Uuidandversion.Uuid))
-			log.Infof("deploy network %s with name %s request sent", el.Uuidandversion.Uuid, el.Displayname)
-		}
-		if err = changer.setControllerAndDev(ctrl, dev); err != nil {
-			log.Fatalf("setControllerAndDev: %s", err)
-		}
-	},
+		},
+	}
+
+	networkNetstatCmd.Flags().UintVar(&outputTail, "tail", 0, "Show only last N lines")
+	networkNetstatCmd.Flags().Var(
+		enumflag.New(&outputFormat, "format", outputFormatIds, enumflag.EnumCaseInsensitive),
+		"format",
+		"Format to print logs, supports: lines, json")
+
+	return networkNetstatCmd
 }
 
-func networkInit() {
-	networkCmd.AddCommand(networkLsCmd)
-	networkCmd.AddCommand(networkDeleteCmd)
-	networkCmd.AddCommand(networkCreateCmd)
+func newNetworkCreateCmd() *cobra.Command {
+	var networkType, networkName, uplinkAdapter string
+	var staticDNSEntries []string
+	var enableFlowlog bool
+
+	//networkCreateCmd is command for create network instance in EVE
+	var networkCreateCmd = &cobra.Command{
+		Use:   "create [subnet]",
+		Short: "Create network instance in EVE",
+		Args:  cobra.RangeArgs(0, 1),
+		Run: func(cmd *cobra.Command, args []string) {
+			subnet := ""
+			if len(args) == 1 {
+				subnet = args[0]
+			}
+			if err := openEVEC.NetworkCreate(subnet, networkType, networkName, uplinkAdapter,
+				staticDNSEntries, enableFlowlog); err != nil {
+				log.Fatal(err)
+			}
+		},
+	}
+
 	networkCreateCmd.Flags().StringVar(&networkType, "type", "local", "Type of network: local or switch")
 	networkCreateCmd.Flags().StringVarP(&networkName, "name", "n", "", "Name of network (empty for auto generation)")
 	networkCreateCmd.Flags().StringVarP(&uplinkAdapter, "uplink", "u", "eth0", "Name of uplink adapter, set to 'none' to not use uplink")
+	networkCreateCmd.Flags().StringArrayVarP(&staticDNSEntries, "static-dns-entries", "s", []string{}, "List of static DNS entries in format HOSTNAME:IP_ADDR,IP_ADDR,...")
+	networkCreateCmd.Flags().BoolVar(&enableFlowlog, "enable-flowlog", false, "enable flow logging (EVE collecting and publishing records of application network flows)")
+
+	return networkCreateCmd
 }

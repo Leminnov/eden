@@ -8,23 +8,30 @@ import (
 	"testing"
 	"time"
 
+	uuid "github.com/satori/go.uuid"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/lf-edge/eden/pkg/controller/eapps"
+	"github.com/lf-edge/eden/pkg/controller/eflowlog"
 	"github.com/lf-edge/eden/pkg/controller/einfo"
 	"github.com/lf-edge/eden/pkg/controller/elog"
 	"github.com/lf-edge/eden/pkg/controller/emetric"
+	"github.com/lf-edge/eden/pkg/controller/types"
 	"github.com/lf-edge/eden/pkg/device"
-	"github.com/lf-edge/eden/pkg/projects"
+	"github.com/lf-edge/eden/pkg/testcontext"
 	"github.com/lf-edge/eden/pkg/tests"
 	"github.com/lf-edge/eden/pkg/utils"
-	"github.com/lf-edge/eve/api/go/info"
-	"github.com/lf-edge/eve/api/go/metrics"
+	"github.com/lf-edge/eve-api/go/flowlog"
+	"github.com/lf-edge/eve-api/go/info"
+	"github.com/lf-edge/eve-api/go/logs"
+	"github.com/lf-edge/eve-api/go/metrics"
 )
 
 var (
 	number   = flag.Int("number", 1, "The number of items (0=unlimited) you need to get")
 	timewait = flag.Duration("timewait", 10*time.Minute, "Timewait for items waiting")
 	out      = flag.String("out", "", "Parameters for out separated by ':'")
+	app      = flag.String("app", "", "Name of app for TestAppLogs")
 
 	// This context holds all the configuration items in the same
 	// way that Eden context works: the commands line options override
@@ -39,7 +46,7 @@ var (
 	                   //    ...
 	                   // }
 	*/
-	tc *projects.TestContext
+	tc *testcontext.TestContext
 
 	query = map[string]string{}
 	found bool
@@ -47,10 +54,15 @@ var (
 )
 
 func mkquery() error {
-	for _, a := range flag.Args() {
+	for _, arg := range flag.Args() {
+		// we use & to indicate background process
+		a := strings.TrimSuffix(arg, "&")
 		for _, f := range strings.Split(a, " ") {
 			s := strings.Split(f, ":")
 			if len(s) == 1 {
+				if s[0] == "" {
+					continue
+				}
 				return fmt.Errorf("incorrect query: %s", f)
 			}
 			query[s[0]] = s[1]
@@ -83,7 +95,7 @@ func TestMain(m *testing.M) {
 
 	tests.TestArgsParse()
 
-	tc = projects.NewTestContext()
+	tc = testcontext.NewTestContext()
 
 	projectName := fmt.Sprintf("%s_%s", "TestLogInfoMetric", time.Now())
 
@@ -163,13 +175,83 @@ func TestLog(t *testing.T) {
 			}
 			t.Log(utils.AddTimestamp(fmt.Sprintf("LOG %d(%d) from %s:\n", items+1, *number, name)))
 			if len(*out) == 0 {
-				elog.LogPrn(log, elog.LogLines)
+				elog.LogPrn(log, types.OutputFormatLines)
 			} else {
-				elog.LogItemPrint(log, elog.LogLines,
+				elog.LogItemPrint(log, types.OutputFormatLines,
 					strings.Split(*out, ":")).Print()
 			}
 
 			cnt := count("Received %d logs from %s", name.String())
+			if cnt != "" {
+				return fmt.Errorf(cnt)
+			}
+			return nil
+		}(t, edgeNode, log)
+	})
+
+	tc.WaitForProc(int(timewait.Seconds()))
+}
+
+func TestAppLog(t *testing.T) {
+	err := mkquery()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if app == nil {
+		t.Fatal("Please provide app flag")
+	}
+
+	appName := *app
+
+	edgeNode := tc.GetEdgeNode(tc.WithTest(t))
+
+	appID := ""
+
+	for _, appUUID := range edgeNode.GetApplicationInstances() {
+		for _, appConfig := range tc.GetController().ListApplicationInstanceConfig() {
+			if appConfig.Displayname == appName && appUUID == appConfig.Uuidandversion.GetUuid() {
+				appID = appUUID
+				break
+			}
+		}
+		if appID != "" {
+			break
+		}
+	}
+
+	if appID == "" {
+		t.Fatalf("No app with name %s found", appName)
+	}
+
+	appUUID, err := uuid.FromString(appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log(utils.AddTimestamp(fmt.Sprintf("Wait for app log of %s app %s number=%d timewait=%s\n",
+		edgeNode.GetID(), appName, *number, timewait)))
+
+	tc.AddProcAppLog(edgeNode, appUUID, func(log *logs.LogEntry) error {
+		return func(t *testing.T, edgeNode *device.Ctx,
+			log *logs.LogEntry) error {
+			name := edgeNode.GetID()
+			if query != nil {
+				if eapps.LogItemFind(log, query) {
+					found = true
+				} else {
+					return nil
+				}
+			}
+			t.Log(utils.AddTimestamp(fmt.Sprintf("APP LOG %d(%d) from %s:\n", items+1, *number, name)))
+			if len(*out) == 0 {
+				eapps.LogPrn(log, types.OutputFormatLines)
+			} else {
+				eapps.LogItemPrint(log, types.OutputFormatLines,
+					strings.Split(*out, ":")).Print()
+			}
+
+			cnt := count("Received %d app logs from %s", name.String())
 			if cnt != "" {
 				return fmt.Errorf(cnt)
 			}
@@ -196,7 +278,7 @@ func TestInfo(t *testing.T) {
 			ei *info.ZInfoMsg) error {
 			name := edgeNode.GetID()
 			if query != nil {
-				if einfo.ZInfoFind(ei, query) != nil {
+				if einfo.ZInfoFind(ei, query) {
 					found = true
 				} else {
 					return nil
@@ -205,9 +287,9 @@ func TestInfo(t *testing.T) {
 
 			t.Log(utils.AddTimestamp(fmt.Sprintf("INFO %d(%d) from %s:\n", items+1, *number, name)))
 			if len(*out) == 0 {
-				einfo.InfoPrn(ei)
+				einfo.ZInfoPrn(ei, types.OutputFormatLines)
 			} else {
-				einfo.ZInfoPrint(ei,
+				einfo.ZInfoPrintFiltered(ei,
 					strings.Split(*out, ":")).Print()
 			}
 			cnt := count("Received %d infos from %s", name.String())
@@ -247,7 +329,7 @@ func TestMetrics(t *testing.T) {
 			t.Log(utils.AddTimestamp(fmt.Sprintf("METRICS %d(%d) from %s:\n",
 				items+1, *number, name)))
 			if len(*out) == 0 {
-				emetric.MetricPrn(mtr)
+				emetric.MetricPrn(mtr, types.OutputFormatLines)
 			} else {
 				emetric.MetricItemPrint(mtr,
 					strings.Split(*out, ":")).Print()
@@ -259,6 +341,46 @@ func TestMetrics(t *testing.T) {
 			}
 			return nil
 		}(t, edgeNode, metric)
+	})
+
+	tc.WaitForProc(int(timewait.Seconds()))
+}
+
+func TestFlowLog(t *testing.T) {
+	err := mkquery()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	edgeNode := tc.GetEdgeNode(tc.WithTest(t))
+
+	t.Log(utils.AddTimestamp(fmt.Sprintf("Wait for FlowLog of %s number=%d timewait=%s\n",
+		edgeNode.GetID(), *number, timewait)))
+
+	tc.AddProcFlowLog(edgeNode, func(log *flowlog.FlowMessage) error {
+		return func(t *testing.T, edgeNode *device.Ctx,
+			flowLog *flowlog.FlowMessage) error {
+			name := edgeNode.GetID()
+			if query != nil {
+				if eflowlog.FlowLogItemFind(flowLog, query) {
+					found = true
+				} else {
+					return nil
+				}
+			}
+			t.Log(utils.AddTimestamp(fmt.Sprintf("FLOWLOG %d(%d) from %s:\n", items+1, *number, name)))
+			if len(*out) == 0 {
+				eflowlog.FlowLogPrn(flowLog, types.OutputFormatLines)
+			} else {
+				eflowlog.FlowLogItemPrint(flowLog, strings.Split(*out, ":")).Print()
+			}
+
+			cnt := count("Received %d FlowLog from %s", name.String())
+			if cnt != "" {
+				return fmt.Errorf(cnt)
+			}
+			return nil
+		}(t, edgeNode, log)
 	})
 
 	tc.WaitForProc(int(timewait.Seconds()))

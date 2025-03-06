@@ -4,11 +4,11 @@ import (
 	"github.com/lf-edge/eden/pkg/device"
 	"github.com/lf-edge/eden/pkg/models"
 	"github.com/lf-edge/eden/pkg/utils"
-	"github.com/lf-edge/eve/api/go/config"
+	"github.com/lf-edge/eve-api/go/config"
 	uuid "github.com/satori/go.uuid"
 )
 
-//CloudCtx is struct for use with controller
+// CloudCtx is struct for use with controller
 type CloudCtx struct {
 	Controller
 	devices              []*device.Ctx
@@ -16,16 +16,18 @@ type CloudCtx struct {
 	images               []*config.Image
 	contentTrees         []*config.ContentTree
 	volumes              []*config.Volume
-	baseOS               []*config.BaseOSConfig
+	baseOSConfigs        []*config.BaseOSConfig
 	networkInstances     []*config.NetworkInstanceConfig
 	networks             []*config.NetworkConfig
 	physicalIOs          map[string]*config.PhysicalIO
 	systemAdapters       map[string]*config.SystemAdapter
+	vlanAdapters         map[string]*config.VlanAdapter
+	bondAdapters         map[string]*config.BondAdapter
 	applicationInstances []*config.AppInstanceConfig
 	vars                 *utils.ConfigVars
 }
 
-//Cloud is an interface of cloud
+// Cloud is an interface of cloud
 type Cloud interface {
 	Controller
 	AddDevice(devUUID uuid.UUID) (dev *device.Ctx, err error)
@@ -54,7 +56,7 @@ type Cloud interface {
 	AddVolume(volumeConfig *config.Volume) error
 	RemoveVolume(id string) error
 	ListVolume() []*config.Volume
-	GetConfigBytes(dev *device.Ctx, pretty bool) ([]byte, error)
+	GetConfigBytes(dev *device.Ctx, jsonFormat bool) ([]byte, error)
 	GetDeviceCurrent() (dev *device.Ctx, err error)
 	ConfigSync(dev *device.Ctx) (err error)
 	ConfigParse(config *config.EdgeDevConfig) (dev *device.Ctx, err error)
@@ -67,12 +69,19 @@ type Cloud interface {
 	GetSystemAdapter(id string) (systemAdapter *config.SystemAdapter, err error)
 	AddSystemAdapter(id string, systemAdapter *config.SystemAdapter) error
 	RemoveSystemAdapter(id string) error
+	GetVlanAdapter(id string) (vlanAdapter *config.VlanAdapter, err error)
+	AddVlanAdapter(id string, vlanAdapter *config.VlanAdapter) error
+	RemoveVlanAdapter(id string) error
+	GetBondAdapter(id string) (bondAdapter *config.BondAdapter, err error)
+	AddBondAdapter(id string, bondAdapter *config.BondAdapter) error
+	RemoveBondAdapter(id string) error
 	ApplyDevModel(dev *device.Ctx, devModel models.DevModel) error
 	GetApplicationInstanceConfig(id string) (applicationInstanceConfig *config.AppInstanceConfig, err error)
 	AddApplicationInstanceConfig(applicationInstanceConfig *config.AppInstanceConfig) error
 	RemoveApplicationInstanceConfig(id string) error
 	ListApplicationInstanceConfig() []*config.AppInstanceConfig
 	StateUpdate(dev *device.Ctx) (err error)
+	ResetDev(node *device.Ctx) error
 	OnBoardDev(node *device.Ctx) error
 	GetVars() *utils.ConfigVars
 	SetVars(*utils.ConfigVars)

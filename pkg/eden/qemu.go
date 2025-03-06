@@ -1,71 +1,85 @@
 package eden
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lf-edge/eden/pkg/defaults"
+	"github.com/lf-edge/eden/pkg/edensdn"
 	"github.com/lf-edge/eden/pkg/utils"
+	sdnapi "github.com/lf-edge/eden/sdn/vm/api"
 	log "github.com/sirupsen/logrus"
 )
 
-//StartEVEQemu function run EVE in qemu
-func StartEVEQemu(qemuARCH, qemuOS, eveImageFile, qemuSMBIOSSerial string, eveTelnetPort int, qemuHostFwd map[string]string, qemuAccel bool, qemuConfigFile, logFile string, pidFile string, foregroud bool) (err error) {
-	qemuCommand := ""
-	qemuOptions := "-display none -nodefaults -no-user-config "
-	qemuOptions += fmt.Sprintf("-serial chardev:char0 -chardev socket,id=char0,port=%d,host=localhost,server,nodelay,nowait,telnet,logfile=%s ", eveTelnetPort, logFile)
-	if qemuSMBIOSSerial != "" {
-		qemuOptions += fmt.Sprintf("-smbios type=1,serial=%s ", qemuSMBIOSSerial)
+// StartSWTPM starts swtpm process and use stateDir as state, log, pid and socket location
+func StartSWTPM(stateDir string) error {
+	if err := os.MkdirAll(stateDir, 0777); err != nil {
+		return err
 	}
-	nets, err := utils.GetSubnetsNotUsed(1)
+	command := "swtpm"
+	logFile := filepath.Join(stateDir, fmt.Sprintf("%s.log", command))
+	pidFile := filepath.Join(stateDir, fmt.Sprintf("%s.pid", command))
+	options := fmt.Sprintf("socket --tpmstate dir=%s --ctrl type=unixio,path=%s --log level=20 --tpm2", stateDir, filepath.Join(stateDir, defaults.DefaultSwtpmSockFile))
+	if err := utils.RunCommandNohup(command, logFile, pidFile, strings.Fields(options)...); err != nil {
+		return fmt.Errorf("StartSWTPM: %s", err)
+	}
+	return nil
+}
+
+// StopSWTPM stops swtpm process using pid from stateDir
+func StopSWTPM(stateDir string) error {
+	command := "swtpm"
+	pidFile := filepath.Join(stateDir, fmt.Sprintf("%s.pid", command))
+	return utils.StopCommandWithPid(pidFile)
+}
+
+func startQMPLogger(qmpSockFile string, qmpLogFile string) error {
+	shellcmd := fmt.Sprintf(
+		"echo '{\"execute\": \"qmp_capabilities\"}' | " +
+		"socat -t0 -,ignoreeof UNIX-CONNECT:%s > %s",
+		qmpSockFile, qmpLogFile)
+	opts := []string{
+		"-c", shellcmd,
+	}
+
+	var err error
+
+	// Retry a few times if socket is not available yet
+	n := 5
+	for n > 0 {
+		if err = utils.RunCommandNohup("sh", "", "", opts...); err != nil {
+			time.Sleep(1 * time.Second)
+			n--
+			continue
+		}
+		break
+	}
 	if err != nil {
-		return fmt.Errorf("StartEVEQemu: %s", err)
+		 return fmt.Errorf("startQMPLogger: can't connect to the QMP socket, presumably QEMU did not start")
 	}
-	offset := 0
-	network := nets[0].Subnet
-	qemuOptions += fmt.Sprintf("-netdev user,id=eth%d,net=%s,dhcpstart=%s", 0, network, nets[0].FirstAddress)
-	for k, v := range qemuHostFwd {
-		origPort, err := strconv.Atoi(k)
-		if err != nil {
-			log.Errorf("Failed converting %s to Integer", k)
-			break
-		}
-		newPort, err := strconv.Atoi(v)
-		if err != nil {
-			log.Errorf("Failed converting %s to Integer", v)
-			break
-		}
-		qemuOptions += fmt.Sprintf(",hostfwd=tcp::%d-:%d", origPort+offset, newPort+offset)
-	}
-	qemuOptions += fmt.Sprintf(" -device virtio-net-pci,netdev=eth%d ", 0)
-	offset += 10
 
-	qemuOptions += fmt.Sprintf("-netdev user,id=eth%d,net=%s,dhcpstart=%s", 1, network, nets[0].SecondAddress)
-	for k, v := range qemuHostFwd {
-		origPort, err := strconv.Atoi(k)
-		if err != nil {
-			log.Errorf("Failed converting %s to Integer", k)
-			break
-		}
-		newPort, err := strconv.Atoi(v)
-		if err != nil {
-			log.Errorf("Failed converting %s to Integer", v)
-			break
-		}
-		qemuOptions += fmt.Sprintf(",hostfwd=tcp::%d-:%d", origPort + offset, newPort + offset)
-	}
-	qemuOptions += fmt.Sprintf(" -device virtio-net-pci,netdev=eth%d ", 1)
+	return nil
+}
 
-	if qemuOS == "" {
-		qemuOS = runtime.GOOS
-	} else {
-		qemuOS = strings.ToLower(qemuOS)
-	}
-	if qemuOS != "linux" && qemuOS != "darwin" {
-		return fmt.Errorf("StartEVEQemu: OS not supported: %s", qemuOS)
-	}
+// StartEVEQemu function run EVE in qemu
+func StartEVEQemu(qemuARCH, qemuOS, eveImageFile, imageFormat string, isInstaller bool,
+	qemuSMBIOSSerial string, eveTelnetPort, qemuMonitorPort, netDevBasePort int,
+	qemuHostFwd map[string]string, qemuAccel bool, qemuConfigFile, logFile, pidFile string,
+	netModel sdnapi.NetworkModel, withSDN bool, tapInterface, usbImagePath string,
+	swtpm, foreground bool) (err error) {
+	var qemuCommand, qemuOptions string
+	qemuOptions += "-nodefaults -no-user-config "
+	netDev := "virtio-net-pci"
+	tpmDev := "tpm-tis"
 	if qemuARCH == "" {
 		qemuARCH = runtime.GOARCH
 	} else {
@@ -79,26 +93,151 @@ func StartEVEQemu(qemuARCH, qemuOS, eveImageFile, qemuSMBIOSSerial string, eveTe
 				qemuOptions += defaults.DefaultQemuAccelDarwin
 			} else {
 				qemuOptions += defaults.DefaultQemuAccelLinuxAmd64
+				// to support pass-through of virtio-net-pci
+				netDev = fmt.Sprintf("%s,disable-legacy=on,disable-modern=off,iommu_platform=on", netDev)
 			}
 		} else {
-			qemuOptions += defaults.DefaultQemulAmd64
+			qemuOptions += defaults.DefaultQemuAmd64
 		}
 	case "arm64":
 		qemuCommand = "qemu-system-aarch64"
 		if qemuAccel {
-			qemuOptions += defaults.DefaultQemuAccelArm64
+			if qemuOS == "darwin" {
+				qemuOptions += defaults.DefaultQemuAccelDarwinArm64
+			} else {
+				qemuOptions += defaults.DefaultQemuAccelArm64
+			}
 		} else {
-			qemuOptions += defaults.DefaultQemulArm64
+			qemuOptions += defaults.DefaultQemuArm64
 		}
+		tpmDev = "tpm-tis-device"
 	default:
 		return fmt.Errorf("StartEVEQemu: Arch not supported: %s", qemuARCH)
 	}
-	qemuOptions += fmt.Sprintf("-drive file=%s,format=qcow2 ", eveImageFile)
+	if qemuSMBIOSSerial != "" {
+		qemuOptions += fmt.Sprintf("-smbios type=1,serial=%s ", qemuSMBIOSSerial)
+	}
+	if qemuMonitorPort != 0 {
+		qemuOptions += fmt.Sprintf("-monitor tcp:localhost:%d,server,nowait  ", qemuMonitorPort)
+	}
+
+	if withSDN {
+		// Ports connecting SDN VM with EVE VM.
+		socketPort := netDevBasePort
+		for i, port := range netModel.Ports {
+			qemuOptions += fmt.Sprintf("-netdev socket,id=eth%d,connect=:%d", i, socketPort)
+			qemuOptions += fmt.Sprintf(" -device %s,netdev=eth%d,mac=%s ", netDev, i,
+				port.EVEConnect.MAC)
+			socketPort++
+		}
+	} else {
+		// Use SLIRP networking to connect QEMU VM with the host.
+		nets, err := utils.GetSubnetsNotUsed(1)
+		if err != nil {
+			return fmt.Errorf("StartEVEQemu: %s", err)
+		}
+		network := nets[0].Subnet
+		var ip net.IP
+		for i, port := range netModel.Ports {
+			switch i {
+			case 0:
+				ip = nets[0].FirstAddress
+			case 1:
+				ip = nets[0].SecondAddress
+			default:
+				return fmt.Errorf("unexpected number of ports (in non-SDN mode): %d",
+					len(netModel.Ports))
+			}
+			qemuOptions += fmt.Sprintf("-netdev user,id=eth%d,net=%s,dhcpstart=%s,ipv6=off",
+				i, network, ip)
+			for k, v := range qemuHostFwd {
+				origPort, err := strconv.Atoi(k)
+				if err != nil {
+					log.Errorf("Failed converting %s to Integer", k)
+					break
+				}
+				newPort, err := strconv.Atoi(v)
+				if err != nil {
+					log.Errorf("Failed converting %s to Integer", v)
+					break
+				}
+				qemuOptions += fmt.Sprintf(",hostfwd=tcp::%d-:%d", origPort+(i*10), newPort+(i*10))
+			}
+			qemuOptions += fmt.Sprintf(" -device %s,netdev=eth%d,mac=%s ", netDev, i,
+				port.EVEConnect.MAC)
+		}
+	}
+
+	if tapInterface != "" {
+		tapIdx := len(netModel.Ports)
+		qemuOptions += fmt.Sprintf("-netdev tap,id=eth%d,ifname=%s", tapIdx, tapInterface)
+		qemuOptions += fmt.Sprintf(" -device %s,netdev=eth%d ", netDev, tapIdx)
+	}
+
+	if swtpm {
+		tpmSocket := filepath.Join(filepath.Dir(eveImageFile), "swtpm", defaults.DefaultSwtpmSockFile)
+		qemuOptions += fmt.Sprintf("-chardev socket,id=chrtpm,path=%s -tpmdev emulator,id=tpm0,chardev=chrtpm -device %s,tpmdev=tpm0 ", tpmSocket, tpmDev)
+	}
+	if qemuOS == "" {
+		qemuOS = runtime.GOOS
+	} else {
+		qemuOS = strings.ToLower(qemuOS)
+	}
+	if qemuOS != "linux" && qemuOS != "darwin" {
+		return fmt.Errorf("StartEVEQemu: OS not supported: %s", qemuOS)
+	}
+	qemuOptions += "-watchdog-action reset "
+
+	if isInstaller {
+		// Run EVE installer, then start EVE VM again but without the installer image.
+		consoleOpts := "-serial stdio "
+		installerOptions := consoleOpts + qemuOptions
+		installerOptions += fmt.Sprintf("-drive file=%s,format=%s ",
+			eveImageFile, imageFormat)
+		if qemuConfigFile != "" {
+			installerOptions += fmt.Sprintf("-readconfig %s ", qemuConfigFile)
+		}
+		log.Infof("Start EVE installer: %s %s", qemuCommand, installerOptions)
+		if err := utils.RunCommandForeground(qemuCommand, strings.Fields(installerOptions)...); err != nil {
+			return fmt.Errorf("StartEVEQemu: %s", err)
+		}
+		// TODO: create a file in dist to mark EVE as installed to avoid running installer on restart
+		// (with "eden eve stop && eden eve start)
+	}
+
+	consoleOps := "-display none "
+	consoleOps += fmt.Sprintf("-serial chardev:char0 -chardev socket,id=char0,port=%d,"+
+		"host=localhost,server,nodelay,nowait,telnet,logappend=on,logfile=%s ",
+		eveTelnetPort, logFile)
+	qemuOptions = consoleOps + qemuOptions
+	if !isInstaller {
+		qemuOptions += fmt.Sprintf("-drive file=%s,format=%s ", eveImageFile, imageFormat)
+	}
+	if usbImagePath != "" {
+		qemuOptions += fmt.Sprintf("-drive format=raw,file=%s ", usbImagePath)
+	}
+
+	// keep readconfig after -drive as we locate additional disks in qemuConfigFile
 	if qemuConfigFile != "" {
 		qemuOptions += fmt.Sprintf("-readconfig %s ", qemuConfigFile)
 	}
+
+	context, err := utils.ContextLoad()
+	if err != nil {
+		return fmt.Errorf("StartEVEQemu: load context error: %w", err)
+	}
+
+	qmpSockFile := fmt.Sprintf("%s-qmp.sock", strings.ToLower(context.Current))
+	qmpLogFile := fmt.Sprintf("%s-qmp.log", strings.ToLower(context.Current))
+
+	qmpSockFile = filepath.Join(filepath.Dir(pidFile), qmpSockFile)
+	qmpLogFile = filepath.Join(filepath.Dir(pidFile), qmpLogFile)
+
+	// QMP sock
+	qemuOptions += fmt.Sprintf("-qmp unix:%s,server,wait=off", qmpSockFile)
+
 	log.Infof("Start EVE: %s %s", qemuCommand, qemuOptions)
-	if foregroud {
+	if foreground {
 		if err := utils.RunCommandForeground(qemuCommand, strings.Fields(qemuOptions)...); err != nil {
 			return fmt.Errorf("StartEVEQemu: %s", err)
 		}
@@ -107,16 +246,104 @@ func StartEVEQemu(qemuARCH, qemuOS, eveImageFile, qemuSMBIOSSerial string, eveTe
 		if err := utils.RunCommandNohup(qemuCommand, logFile, pidFile, strings.Fields(qemuOptions)...); err != nil {
 			return fmt.Errorf("StartEVEQemu: %s", err)
 		}
+		err = startQMPLogger(qmpSockFile, qmpLogFile)
+		if err != nil {
+			// Not critical, so just print and continue
+			log.Errorf("%v", err)
+		}
 	}
 	return nil
 }
 
-//StopEVEQemu function stop EVE
+// StopEVEQemu function stop EVE
 func StopEVEQemu(pidFile string) (err error) {
 	return utils.StopCommandWithPid(pidFile)
 }
 
-//StatusEVEQemu function get status of EVE
+// StatusEVEQemu function get status of EVE
 func StatusEVEQemu(pidFile string) (status string, err error) {
 	return utils.StatusCommandWithPid(pidFile)
+}
+
+// SetLinkStateQemu changes the link state of the given interface.
+func SetLinkStateQemu(qemuMonitorPort int, ifName string, up bool) error {
+	tcpAddr, _ := net.ResolveTCPAddr("tcp", fmt.Sprintf("localhost:%d", qemuMonitorPort))
+	conn, err := net.DialTCP("tcp", nil, tcpAddr)
+	if err != nil {
+		return err
+	}
+	linkState := "on"
+	if !up {
+		linkState = "off"
+	}
+	cmd := fmt.Sprintf("set_link %s %s", ifName, linkState)
+	_, err = conn.Write([]byte(cmd + "\n"))
+	if err == nil {
+		err = conn.CloseWrite()
+	}
+	if err != nil {
+		return fmt.Errorf("failed to send '%s' command to qemu: %v", cmd, err)
+	}
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		// read output from the QEMU monitor command prompt
+		line := scanner.Text()
+		if strings.HasPrefix(line, "QEMU") || strings.HasPrefix(line, "(qemu)") {
+			continue
+		}
+		// anything else must be an error message
+		return errors.New(line)
+	}
+	if scanner.Err() != nil {
+		return fmt.Errorf("failed to read response from QEMU monitor: %v", scanner.Err())
+	}
+	return nil
+}
+
+// GetLinkStatesQemu returns link states for the given set of EVE interfaces.
+func GetLinkStatesQemu(qemuMonitorPort int, ifNames []string) (linkStates []edensdn.LinkState, err error) {
+	// Unfortunately QEMU Monitor doesn't provide command to obtain
+	// the current link state of interfaces.
+	// All we can do is to traverse through the command history,
+	// find the last invocation of set_link command for every interface and assume
+	// that it succeeded.
+	var linkStateMap = make(map[string]bool)
+	for _, ifName := range ifNames {
+		// initial state
+		linkStateMap[ifName] = true
+	}
+	tcpAddr, _ := net.ResolveTCPAddr("tcp", fmt.Sprintf("localhost:%d", qemuMonitorPort))
+	conn, err := net.DialTCP("tcp", nil, tcpAddr)
+	if err != nil {
+		return nil, err
+	}
+	cmd := "info history"
+	_, err = conn.Write([]byte(cmd + "\n"))
+	if err == nil {
+		err = conn.CloseWrite()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to send '%s' command to qemu: %v", cmd, err)
+	}
+	scanner := bufio.NewScanner(conn)
+	setLinkCmdReg := regexp.MustCompile(`'set_link (\S+) (on|off)'`)
+	for scanner.Scan() {
+		// read output from the QEMU monitor command prompt
+		line := scanner.Text()
+		match := setLinkCmdReg.FindStringSubmatch(line)
+		if len(match) == 3 {
+			nicName := match[1]
+			isUp := match[2] == "on"
+			if _, knownNic := linkStateMap[nicName]; knownNic {
+				linkStateMap[nicName] = isUp
+			}
+		}
+	}
+	if scanner.Err() != nil {
+		return nil, fmt.Errorf("failed to read response from QEMU monitor: %v", scanner.Err())
+	}
+	for nicName, isUP := range linkStateMap {
+		linkStates = append(linkStates, edensdn.LinkState{EveIfName: nicName, IsUP: isUP})
+	}
+	return linkStates, nil
 }

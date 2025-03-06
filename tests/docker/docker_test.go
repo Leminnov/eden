@@ -3,20 +3,21 @@ package lim
 import (
 	"flag"
 	"fmt"
-	"github.com/docker/docker/pkg/namesgenerator"
-	"github.com/dustin/go-humanize"
-	"github.com/lf-edge/eden/pkg/device"
-	"github.com/lf-edge/eden/pkg/expect"
-	"github.com/lf-edge/eden/pkg/projects"
-	"github.com/lf-edge/eden/pkg/utils"
-	"github.com/lf-edge/eve/api/go/config"
-	"github.com/lf-edge/eve/api/go/info"
-	log "github.com/sirupsen/logrus"
 	"math/rand"
 	"net"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/docker/docker/pkg/namesgenerator"
+	"github.com/dustin/go-humanize"
+	"github.com/lf-edge/eden/pkg/device"
+	"github.com/lf-edge/eden/pkg/expect"
+	"github.com/lf-edge/eden/pkg/testcontext"
+	"github.com/lf-edge/eden/pkg/utils"
+	"github.com/lf-edge/eve-api/go/config"
+	"github.com/lf-edge/eve-api/go/info"
+	log "github.com/sirupsen/logrus"
 )
 
 // This test deploys the docker://nginx app into EVE with port forwarding 8028->80
@@ -32,7 +33,7 @@ var (
 	cpus         = flag.Uint("cpus", 1, "Cpu number for app")
 	memory       = flag.String("memory", "1G", "Memory for app")
 	nohyper      = flag.Bool("nohyper", false, "Do not use a hypervisor")
-	tc           *projects.TestContext
+	tc           *testcontext.TestContext
 	externalIP   string
 	portPublish  []string
 	appName      string
@@ -45,7 +46,7 @@ var (
 func TestMain(m *testing.M) {
 	fmt.Println("Docker app deployment Test")
 
-	tc = projects.NewTestContext()
+	tc = testcontext.NewTestContext()
 
 	projectName := fmt.Sprintf("%s_%s", "TestDockerDeploy", time.Now())
 
@@ -60,8 +61,8 @@ func TestMain(m *testing.M) {
 	os.Exit(res)
 }
 
-//checkAppDeployStarted wait for info of ZInfoApp type with mention of deployed AppName
-func checkAppDeployStarted(appName string) projects.ProcInfoFunc {
+// checkAppDeployStarted wait for info of ZInfoApp type with mention of deployed AppName
+func checkAppDeployStarted(appName string) testcontext.ProcInfoFunc {
 	return func(msg *info.ZInfoMsg) error {
 		if msg.Ztype == info.ZInfoTypes_ZiApp {
 			if msg.GetAinfo().AppName == appName {
@@ -72,8 +73,8 @@ func checkAppDeployStarted(appName string) projects.ProcInfoFunc {
 	}
 }
 
-//checkAppRunning wait for info of ZInfoApp type with mention of deployed AppName and ZSwState_RUNNING state
-func checkAppRunning(appName string) projects.ProcInfoFunc {
+// checkAppRunning wait for info of ZInfoApp type with mention of deployed AppName and ZSwState_RUNNING state
+func checkAppRunning(appName string) testcontext.ProcInfoFunc {
 	return func(msg *info.ZInfoMsg) error {
 		if msg.Ztype == info.ZInfoTypes_ZiApp {
 			if msg.GetAinfo().AppName == appName {
@@ -86,8 +87,8 @@ func checkAppRunning(appName string) projects.ProcInfoFunc {
 	}
 }
 
-//getEVEIP wait for IPs of EVE and returns them
-func getEVEIP(edgeNode *device.Ctx) projects.ProcTimerFunc {
+// getEVEIP wait for IPs of EVE and returns them
+func getEVEIP(edgeNode *device.Ctx) testcontext.ProcTimerFunc {
 	return func() error {
 		if edgeNode.GetRemoteAddr() == "" { //no eve.remote-addr defined
 			eveIP, err := tc.GetState(edgeNode).LookUp("Dinfo.Network[0].IPAddrs[0]")
@@ -106,22 +107,32 @@ func getEVEIP(edgeNode *device.Ctx) projects.ProcTimerFunc {
 	}
 }
 
-//checkAppAccess try to access APP with timer
-func checkAppAccess() projects.ProcTimerFunc {
+// checkAppAccess try to access APP with timer
+func checkAppAccess(edgeNode *device.Ctx) testcontext.ProcTimerFunc {
 	return func() error {
-		if externalIP == "" {
-			return nil
+		if edgeNode.GetRemote() {
+			if externalIP == "" {
+				return nil
+			}
+			res, err := utils.RequestHTTPWithTimeout(fmt.Sprintf("http://%s:%d", externalIP, *externalPort), time.Second)
+			if err != nil {
+				return nil
+			}
+			return fmt.Errorf(res)
 		}
-		res, err := utils.RequestHTTPWithTimeout(fmt.Sprintf("http://%s:%d", externalIP, *externalPort), time.Second)
-		if err != nil {
-			return nil
-		}
-		return fmt.Errorf(res)
+		return tc.PortForwardCommand(func(fwdPort uint16) error {
+			res, err := utils.RequestHTTPWithTimeout(
+				fmt.Sprintf("http://127.0.0.1:%d", fwdPort), time.Second)
+			if err != nil {
+				return nil
+			}
+			return fmt.Errorf(res)
+		}, "eth0", uint16(*externalPort))
 	}
 }
 
-//checkAppAbsent check if APP undefined in EVE
-func checkAppAbsent(appName string) projects.ProcInfoFunc {
+// checkAppAbsent check if APP undefined in EVE
+func checkAppAbsent(appName string) testcontext.ProcInfoFunc {
 	return func(msg *info.ZInfoMsg) error {
 		if msg.Ztype == info.ZInfoTypes_ZiDevice {
 			for _, app := range msg.GetDinfo().AppInstances {
@@ -135,16 +146,16 @@ func checkAppAbsent(appName string) projects.ProcInfoFunc {
 	}
 }
 
-//TestDockerStart gets EdgeNode and deploys app, defined in appLink
-//it generates random appName and adds processing functions
-//it checks if app processed by EVE, app in RUNNING state, app is accessible by HTTP get
-//it uses timewait for processing all events
+// TestDockerStart gets EdgeNode and deploys app, defined in appLink
+// it generates random appName and adds processing functions
+// it checks if app processed by EVE, app in RUNNING state, app is accessible by HTTP get
+// it uses timewait for processing all events
 func TestDockerStart(t *testing.T) {
 	edgeNode := tc.GetEdgeNode(tc.WithTest(t))
 
 	if *name == "" {
-		rand.Seed(time.Now().UnixNano())
-		appName = namesgenerator.GetRandomName(0) //generates new name if no flag set
+		rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+		appName = namesgenerator.GetRandomName(rnd.Intn(1)) //generates new name if no flag set
 	} else {
 		appName = *name
 	}
@@ -197,16 +208,16 @@ func TestDockerStart(t *testing.T) {
 
 	if *externalPort != 0 {
 
-		tc.AddProcTimer(edgeNode, checkAppAccess())
+		tc.AddProcTimer(edgeNode, checkAppAccess(edgeNode))
 
 	}
 
 	tc.WaitForProc(int(timewait.Seconds()))
 }
 
-//TestDockerDelete gets EdgeNode and deletes previously deployed app, defined in appName
-//it checks if app absent in EVE
-//it uses timewait for processing all events
+// TestDockerDelete gets EdgeNode and deletes previously deployed app, defined in appName
+// it checks if app absent in EVE
+// it uses timewait for processing all events
 func TestDockerDelete(t *testing.T) {
 
 	if appName == "" { //if previous appName not defined

@@ -16,9 +16,8 @@
         "Ifname": "eth0"
       },
       "logicallabel": "eth0",
-      "usagePolicy": {
-        "freeUplink": true
-      }
+      "cost": 0,
+      "usagePolicy": {}
     },
     {
       "ztype": 1,
@@ -28,9 +27,8 @@
         "Ifname": "eth1"
       },
       "logicallabel": "eth1",
-      "usagePolicy": {
-        "freeUplink": true
-      }
+      "cost": 0,
+      "usagePolicy": {}
     }
   ]
 }

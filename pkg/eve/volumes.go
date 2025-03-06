@@ -1,43 +1,53 @@
 package eve
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/dustin/go-humanize"
 	"github.com/lf-edge/eden/pkg/controller"
+	"github.com/lf-edge/eden/pkg/controller/types"
 	"github.com/lf-edge/eden/pkg/device"
-	"github.com/lf-edge/eve/api/go/config"
-	"github.com/lf-edge/eve/api/go/info"
-	"github.com/lf-edge/eve/api/go/metrics"
+	"github.com/lf-edge/eve-api/go/config"
+	"github.com/lf-edge/eve-api/go/info"
+	"github.com/lf-edge/eve-api/go/metrics"
 )
 
-//VolInstState stores state of volumes
+// VolInstState stores state of volumes
 type VolInstState struct {
 	Name          string
 	UUID          string
 	Image         string
-	VolumeType    config.Format
+	VolumeType    string
 	Size          string
 	MaxSize       string
 	AdamState     string
 	EveState      string
+	LastError     string
 	Ref           string
 	contentTreeID string
+	MountPoint    string
+	OriginType    string
 	deleted       bool
 }
 
 func volInstStateHeader() string {
-	return "NAME\tUUID\tREF\tIMAGE\tTYPE\tSIZE\tMAX_SIZE\tSTATE(ADAM)\tLAST_STATE(EVE)"
+	return "NAME\tUUID\tREF\tIMAGE\tTYPE\tSIZE\tMAX_SIZE\tMOUNT\tSTATE(ADAM)\tLAST_STATE(EVE)"
 }
 
 func (volInstStateObj *VolInstState) toString() string {
-	return fmt.Sprintf("%s\t%s\t%s\t%s\t%v\t%s\t%s\t%s\t%s",
+	state := volInstStateObj.EveState
+	if volInstStateObj.LastError != "" {
+		state = fmt.Sprintf("%s: %s", volInstStateObj.EveState, volInstStateObj.LastError)
+	}
+	return fmt.Sprintf("%s\t%s\t%s\t%s\t%v\t%s\t%s\t%s\t%s\t%s",
 		volInstStateObj.Name, volInstStateObj.UUID, volInstStateObj.Ref, volInstStateObj.Image,
-		volInstStateObj.VolumeType, volInstStateObj.Size, volInstStateObj.MaxSize,
-		volInstStateObj.AdamState, volInstStateObj.EveState)
+		volInstStateObj.VolumeType, volInstStateObj.Size, volInstStateObj.MaxSize, volInstStateObj.MountPoint,
+		volInstStateObj.AdamState, state)
 }
 
 func (ctx *State) initVolumes(ctrl controller.Cloud, dev *device.Ctx) error {
@@ -48,11 +58,18 @@ func (ctx *State) initVolumes(ctrl controller.Cloud, dev *device.Ctx) error {
 			return fmt.Errorf("no Volume in cloud %s: %s", el, err)
 		}
 		contentTreeID := vi.GetOrigin().GetDownloadContentTreeID()
-		ct, err := ctrl.GetContentTree(contentTreeID)
-		if err != nil {
-			return fmt.Errorf("no ContentTree in cloud %s: %s", contentTreeID, err)
+		image := "-"
+		iFormat := config.Format_RAW
+		if vi.GetOrigin().GetType() == config.VolumeContentOriginType_VCOT_DOWNLOAD {
+			ct, err := ctrl.GetContentTree(contentTreeID)
+			if err != nil {
+				return fmt.Errorf("no ContentTree in cloud %s: %s", contentTreeID, err)
+			}
+			image = ct.GetURL()
+			iFormat = ct.Iformat
 		}
-		ref := "-"
+		var ref []string
+		var mountPoint []string
 	appInstanceLoop:
 		for _, id := range dev.GetApplicationInstances() {
 			appInstanceConfig, err := ctrl.GetApplicationInstanceConfig(id)
@@ -61,7 +78,8 @@ func (ctx *State) initVolumes(ctrl controller.Cloud, dev *device.Ctx) error {
 			}
 			for _, volumeRef := range appInstanceConfig.VolumeRefList {
 				if volumeRef.Uuid == vi.GetUuid() {
-					ref = fmt.Sprintf("app: %s", appInstanceConfig.Displayname)
+					ref = append(ref, fmt.Sprintf("app: %s", appInstanceConfig.Displayname))
+					mountPoint = append(mountPoint, volumeRef.MountDir)
 					break appInstanceLoop
 				}
 			}
@@ -69,16 +87,18 @@ func (ctx *State) initVolumes(ctrl controller.Cloud, dev *device.Ctx) error {
 		volInstStateObj := &VolInstState{
 			Name:          vi.GetDisplayName(),
 			UUID:          vi.GetUuid(),
-			Image:         ct.GetURL(),
-			VolumeType:    ct.Iformat,
-			AdamState:     "IN_CONFIG",
+			Image:         image,
+			VolumeType:    iFormat.String(),
+			AdamState:     inControllerConfig,
 			EveState:      "UNKNOWN",
 			Size:          "-",
 			MaxSize:       "-",
-			Ref:           ref,
+			MountPoint:    strings.Join(mountPoint, ";"),
+			Ref:           strings.Join(ref, ";"),
 			contentTreeID: contentTreeID,
+			OriginType:    vi.GetOrigin().GetType().String(),
 		}
-		ctx.volumes[volInstStateObj.Name] = volInstStateObj
+		ctx.volumes[vi.GetUuid()] = volInstStateObj
 	}
 	return nil
 }
@@ -87,30 +107,24 @@ func (ctx *State) processVolumesByInfo(im *info.ZInfoMsg) {
 	switch im.GetZtype() {
 	case info.ZInfoTypes_ZiVolume:
 		infoObject := im.GetVinfo()
-		if infoObject.DisplayName == "" {
-			for _, el := range ctx.volumes {
-				if infoObject.Uuid == el.UUID {
-					el.deleted = true
-					break
-				}
-			}
-			return
-		}
-		volInstStateObj, ok := ctx.volumes[infoObject.GetDisplayName()]
+		volInstStateObj, ok := ctx.volumes[infoObject.GetUuid()]
 		if !ok {
 			volInstStateObj = &VolInstState{
-				Name:      infoObject.GetDisplayName(),
-				UUID:      infoObject.GetUuid(),
-				AdamState: "NOT_IN_CONFIG",
-				EveState:  infoObject.State.String(),
-				Size:      "-",
-				MaxSize:   "-",
-				Ref:       "-",
+				Name:       infoObject.GetDisplayName(),
+				UUID:       infoObject.GetUuid(),
+				AdamState:  notInControllerConfig,
+				EveState:   infoObject.State.String(),
+				Size:       "-",
+				MaxSize:    "-",
+				MountPoint: "-",
+				Ref:        "-",
 			}
-			ctx.volumes[infoObject.GetDisplayName()] = volInstStateObj
+			ctx.volumes[infoObject.GetUuid()] = volInstStateObj
 		}
-		if volInstStateObj.VolumeType != config.Format_FmtUnknown &&
-			volInstStateObj.VolumeType != config.Format_CONTAINER {
+		volInstStateObj.deleted =
+			infoObject.DisplayName == "" || infoObject.State == info.ZSwState_INVALID
+		if volInstStateObj.VolumeType != config.Format_FmtUnknown.String() &&
+			volInstStateObj.VolumeType != config.Format_CONTAINER.String() {
 			//we cannot use limits for container or unknown types
 			if infoObject.GetResources() != nil {
 				//MaxSizeBytes to show in MAX_SIZE column
@@ -120,16 +134,25 @@ func (ctx *State) processVolumesByInfo(im *info.ZInfoMsg) {
 			}
 		}
 		if infoObject.GetVolumeErr() != nil {
-			volInstStateObj.EveState = fmt.Sprintf("ERRORS: %s", infoObject.GetVolumeErr().String())
+			volInstStateObj.LastError = infoObject.GetVolumeErr().String()
+		} else {
+			volInstStateObj.LastError = ""
+		}
+		if volInstStateObj.OriginType == config.VolumeContentOriginType_VCOT_BLANK.String() {
+			volInstStateObj.EveState = infoObject.GetState().String()
 		}
 	case info.ZInfoTypes_ZiContentTree:
 		infoObject := im.GetCinfo()
 		for _, el := range ctx.volumes {
 			if infoObject.Uuid == el.contentTreeID {
+				el.EveState = infoObject.GetState().String()
 				if infoObject.GetErr() != nil {
-					el.EveState = fmt.Sprintf("ERRORS: %s", infoObject.GetErr().String())
-				} else {
-					el.EveState = infoObject.State.String()
+					el.LastError = infoObject.GetErr().String()
+					continue
+				}
+				el.LastError = ""
+				if infoObject.State == info.ZSwState_DOWNLOAD_STARTED {
+					el.EveState = fmt.Sprintf("%s (%d%%)", el.EveState, infoObject.ProgressPercentage)
 				}
 			}
 		}
@@ -139,19 +162,14 @@ func (ctx *State) processVolumesByInfo(im *info.ZInfoMsg) {
 func (ctx *State) processVolumesByMetric(msg *metrics.ZMetricMsg) {
 	if volumeMetrics := msg.GetVm(); volumeMetrics != nil {
 		for _, volumeMetric := range volumeMetrics {
-			for _, el := range ctx.volumes {
-				if volumeMetric.Uuid == el.UUID {
-					//UsedBytes to show in SIZE column
-					el.Size = humanize.Bytes(volumeMetric.GetUsedBytes())
-					break
-				}
+			volInstStateObj, ok := ctx.volumes[volumeMetric.GetUuid()]
+			if ok {
+				volInstStateObj.Size = humanize.Bytes(volumeMetric.GetUsedBytes())
 			}
 		}
 	}
 }
-
-//VolumeList prints volumes
-func (ctx *State) VolumeList() error {
+func (ctx *State) printVolumeListLines() error {
 	w := new(tabwriter.Writer)
 	w.Init(os.Stdout, 0, 8, 1, '\t', 0)
 	if _, err := fmt.Fprintln(w, volInstStateHeader()); err != nil {
@@ -163,11 +181,30 @@ func (ctx *State) VolumeList() error {
 		return volInstStatesSlice[i].Name < volInstStatesSlice[j].Name
 	})
 	for _, el := range volInstStatesSlice {
-		if !el.deleted {
-			if _, err := fmt.Fprintln(w, el.toString()); err != nil {
-				return err
-			}
+		if _, err := fmt.Fprintln(w, el.toString()); err != nil {
+			return err
 		}
 	}
 	return w.Flush()
+}
+
+func (ctx *State) printVolumeListJSON() error {
+	result, err := json.MarshalIndent(ctx.Volumes(), "", "    ")
+	if err != nil {
+		return err
+	}
+	//nolint:forbidigo
+	fmt.Println(string(result))
+	return nil
+}
+
+// VolumeList prints volumes
+func (ctx *State) VolumeList(outputFormat types.OutputFormat) error {
+	switch outputFormat {
+	case types.OutputFormatLines:
+		return ctx.printVolumeListLines()
+	case types.OutputFormatJSON:
+		return ctx.printVolumeListJSON()
+	}
+	return fmt.Errorf("unimplemented output format")
 }

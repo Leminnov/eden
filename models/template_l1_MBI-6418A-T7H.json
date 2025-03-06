@@ -9,7 +9,7 @@
   },
   "logo": {
     "logo_back": "/workspace/spec/logo_back_MBI-6418A-T7H.jpg",
-    "logo_front": "/workspace/spec/logo_front_MBI-6418A-T7H.jpg"
+    "logo_front": "/workspace/spec/logo_front_MBI-6418A-T7H.png"
   },
   "ioMemberList": [
     {
@@ -22,9 +22,8 @@
         "PciLong": "0000:00:14.0"
       },
       "logicallabel": "eth0",
-      "usagePolicy": {
-        "freeUplink": true
-      }
+      "cost": 0,
+      "usagePolicy": {}
     },
     {
       "ztype": 1,
@@ -35,9 +34,8 @@
         "PciLong": "0000:00:14.1"
       },
       "logicallabel": "eth1",
-      "usagePolicy": {
-        "freeUplink": true
-      }
+      "cost": 0,
+      "usagePolicy": {}
     },
     {
       "ztype": 2,

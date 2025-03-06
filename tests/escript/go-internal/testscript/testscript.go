@@ -13,7 +13,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,6 +99,8 @@ func (e *Env) Setenv(key, value string) {
 //
 // If Cleanup is called on the returned value, the function will run
 // after any functions passed to Env.Defer.
+//
+//nolint:ireturn
 func (e *Env) T() T {
 	return e.ts.t
 }
@@ -122,7 +123,7 @@ type Params struct {
 	// Condition is called, if not nil, to determine whether a particular
 	// condition is true. It's called only for conditions not in the
 	// standard set, and may be nil.
-	Condition func(cond string) (bool, error)
+	Condition func(ts *TestScript, cond string) (bool, error)
 
 	// Cmds holds a map of commands available to the script.
 	// It will only be consulted for commands not part of the standard set.
@@ -178,6 +179,12 @@ type T interface {
 	Verbose() bool
 }
 
+// TFailed holds optional extra methods implemented on T.
+// It's defined as a separate type for backward compatibility reasons.
+type TFailed interface {
+	Failed() bool
+}
+
 type tshim struct {
 	*testing.T
 }
@@ -205,7 +212,7 @@ func RunT(t T, p Params) {
 	}
 	testTempDir := p.WorkdirRoot
 	if testTempDir == "" {
-		testTempDir, err = ioutil.TempDir(os.Getenv("GOTMPDIR"), "go-test-script")
+		testTempDir, err = os.MkdirTemp(os.Getenv("GOTMPDIR"), "go-test-script")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -226,13 +233,16 @@ func RunT(t T, p Params) {
 		name := strings.TrimSuffix(filepath.Base(file), ".txt")
 		t.Run(name, func(t T) {
 			t.Parallel()
+			ctx := context.Background()
+			ctxt, cancel := context.WithCancel(ctx)
 			ts := &TestScript{
 				t:             t,
 				testTempDir:   testTempDir,
 				name:          name,
 				file:          file,
 				params:        p,
-				ctxt:          context.Background(),
+				ctxt:          ctxt,
+				cancel:        cancel,
 				deferred:      func() {},
 				scriptFiles:   make(map[string]string),
 				scriptUpdates: make(map[string]string),
@@ -280,10 +290,12 @@ type TestScript struct {
 	scriptFiles   map[string]string           // files stored in the txtar archive (absolute paths -> path in script)
 	scriptUpdates map[string]string           // updates to testscript files via UpdateScripts.
 
-	ctxt context.Context // per TestScript context
+	cancel context.CancelFunc
+	ctxt   context.Context // per TestScript context
 }
 
 type backgroundCmd struct {
+	name string
 	cmd  *exec.Cmd
 	wait <-chan struct{}
 	neg  bool // if true, cmd should fail
@@ -298,6 +310,7 @@ func (ts *TestScript) setup() string {
 		Vars: []string{
 			"WORK=" + ts.workdir, // must be first for ts.abbrev
 			"PATH=" + os.Getenv("PATH"),
+			"DOCKER_HOST=" + os.Getenv("DOCKER_HOST"),
 			tempEnvName() + "=" + filepath.Join(ts.workdir, "tmp"),
 			"devnull=" + os.DevNull,
 			"/=" + string(os.PathSeparator),
@@ -342,7 +355,7 @@ func (ts *TestScript) setup() string {
 		name := ts.MkAbs(ts.expand(f.Name))
 		ts.scriptFiles[name] = f.Name
 		ts.Check(os.MkdirAll(filepath.Dir(name), 0777))
-		ts.Check(ioutil.WriteFile(name, f.Data, 0666))
+		ts.Check(os.WriteFile(name, f.Data, 0666))
 	}
 	// Run any user-defined setup.
 	if ts.params.Setup != nil {
@@ -389,10 +402,16 @@ func (ts *TestScript) run() {
 		for _, bg := range ts.background {
 			interruptProcess(bg.cmd.Process)
 		}
-		for _, bg := range ts.background {
-			<-bg.wait
+		if ts.t.Verbose() || hasFailed(ts.t) {
+			// In verbose mode or on test failure, we want to see what happened in the background
+			// processes too.
+			ts.waitBackground(false)
+		} else {
+			for _, bg := range ts.background {
+				<-bg.wait
+			}
+			ts.background = nil
 		}
-		ts.background = nil
 
 		markTime()
 		// Flush testScript log to testing.T log.
@@ -449,7 +468,8 @@ Script:
 			continue
 		}
 
-		// Echo command to log.
+		// Echo command to log and stdout.
+		fmt.Printf("> %s\n", line)
 		fmt.Fprintf(&ts.log, "> %s\n", line)
 
 		// Command prefix [cond] means only run this command if cond is satisfied.
@@ -519,6 +539,13 @@ Script:
 	}
 }
 
+func hasFailed(t T) bool {
+	if t, ok := t.(TFailed); ok {
+		return t.Failed()
+	}
+	return false
+}
+
 func (ts *TestScript) applyScriptUpdates() {
 	if len(ts.scriptUpdates) == 0 {
 		return
@@ -547,7 +574,7 @@ func (ts *TestScript) applyScriptUpdates() {
 			panic("script update file not found")
 		}
 	}
-	if err := ioutil.WriteFile(ts.file, txtar.Format(ts.archive), 0666); err != nil {
+	if err := os.WriteFile(ts.file, txtar.Format(ts.archive), 0666); err != nil {
 		ts.t.Fatal("cannot update script: ", err)
 	}
 	ts.Logf("%s updated", ts.file)
@@ -578,8 +605,25 @@ func (ts *TestScript) condition(cond string) (bool, error) {
 			}).(bool)
 			return ok, nil
 		}
+		if strings.HasPrefix(cond, "stdout:") || strings.HasPrefix(cond, "stderr:") {
+			var pattern, source string
+			switch {
+			case strings.HasPrefix(cond, "stdout:"):
+				pattern = cond[len("stdout:"):]
+				source = ts.stdout
+			case strings.HasPrefix(cond, "stderr:"):
+				pattern = cond[len("stderr:"):]
+				source = ts.stderr
+			default:
+				ts.Fatalf("unexpected prefix in %q", cond)
+				panic("unreachable")
+			}
+			re, err := regexp.Compile(`(?m)` + pattern)
+			ts.Check(err)
+			return re.MatchString(source), nil
+		}
 		if ts.params.Condition != nil {
-			return ts.params.Condition(cond)
+			return ts.params.Condition(ts, cond)
 		}
 		ts.Fatalf("unknown condition %q", cond)
 		panic("unreachable")
@@ -628,9 +672,12 @@ func (ts *TestScript) Logf(format string, args ...interface{}) {
 // exec runs the given command line (an actual subprocess, not simulated)
 // in ts.cd with environment ts.env and then returns collected standard output and standard error.
 func (ts *TestScript) exec(command string, args ...string) (stdout, stderr string, err error) {
-	cmd, _, err := ts.buildExecCmd(command, args...)
+	ctx, cmd, cancel, err := ts.buildExecCmd(command, args...)
 	if err != nil {
 		return "", "", err
+	}
+	if cancel != nil {
+		defer cancel()
 	}
 	cmd.Dir = ts.cd
 	cmd.Env = append(ts.env, "PWD="+ts.cd)
@@ -639,7 +686,7 @@ func (ts *TestScript) exec(command string, args ...string) (stdout, stderr strin
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 	if err = cmd.Start(); err == nil {
-		err = ctxWait(ts.ctxt, cmd)
+		err = ctxWait(ctx, cmd)
 	}
 	ts.stdin = ""
 	return stdoutBuf.String(), stderrBuf.String(), err
@@ -647,10 +694,10 @@ func (ts *TestScript) exec(command string, args ...string) (stdout, stderr strin
 
 // execBackground starts the given command line (an actual subprocess, not simulated)
 // in ts.cd with environment ts.env.
-func (ts *TestScript) execBackground(command string, args ...string) (*exec.Cmd, context.CancelFunc, error) {
-	cmd, cancelFunc, err := ts.buildExecCmd(command, args...)
+func (ts *TestScript) execBackground(command string, args ...string) (*exec.Cmd, context.CancelFunc, *strings.Builder, *strings.Builder, error) {
+	_, cmd, cancelFunc, err := ts.buildExecCmd(command, args...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	cmd.Dir = ts.cd
 	cmd.Env = append(ts.env, "PWD="+ts.cd)
@@ -659,25 +706,25 @@ func (ts *TestScript) execBackground(command string, args ...string) (*exec.Cmd,
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 	ts.stdin = ""
-	return cmd, cancelFunc, cmd.Start()
+	return cmd, cancelFunc, &stdoutBuf, &stderrBuf, cmd.Start()
 }
 
-func (ts *TestScript) buildExecCmd(command string, args ...string) (*exec.Cmd, context.CancelFunc, error) {
+func (ts *TestScript) buildExecCmd(command string, args ...string) (context.Context, *exec.Cmd, context.CancelFunc, error) {
 	if filepath.Base(command) == command {
 		lp, err := execpath.Look(command, ts.Getenv)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		command = lp
 	}
 	if timewait == 0 {
 		//ts.ctxt = context.Background()
-		return exec.Command(command, args...), nil, nil
+		return ts.ctxt, exec.Command(command, args...), nil, nil
 	}
 	//ts.ctxt, _ = context.WithTimeout(context.Background(), timewait)
 	//return exec.CommandContext(ts.ctxt, command, args...), nil
-	ctx, cancelFunc := context.WithTimeout(context.Background(), timewait)
-	return exec.CommandContext(ctx, command, args...), cancelFunc, nil
+	ctx, cancelFunc := context.WithTimeout(ts.ctxt, timewait)
+	return ctx, exec.CommandContext(ctx, command, args...), cancelFunc, nil
 }
 
 // BackgroundCmds returns a slice containing all the commands that have
@@ -704,7 +751,7 @@ func ctxWait(ctx context.Context, cmd *exec.Cmd) error {
 		return err
 	case <-ctx.Done():
 		interruptProcess(cmd.Process)
-		return <-errc
+		return ctx.Err()
 	}
 }
 
@@ -747,6 +794,8 @@ func (ts *TestScript) removeGHAnnotation() {
 	filteredBuffer := bytes.Buffer{}
 	bytesReader := bytes.NewReader(ts.log.Bytes())
 	scanner := bufio.NewScanner(bytesReader)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
 		text := scanner.Text()
 		if strings.Contains(text, "::error file") {
@@ -786,8 +835,10 @@ func (ts *TestScript) addGHAnnotation() {
 	fmt.Printf("::error file=%s,line=%d::%s\n", pathToPrint, ts.lineno, ghAnnotation)
 }
 
-//Fatalf aborts the test with the given failure message.
+// Fatalf aborts the test with the given failure message.
 func (ts *TestScript) Fatalf(format string, args ...interface{}) {
+	defer ts.cancel()
+	ts.stopped = true
 	fmt.Fprintf(&ts.log, "FAIL: %s:%d: %s\n", ts.file, ts.lineno, fmt.Sprintf(format, args...))
 	ts.addGHAnnotation()
 	ts.t.FailNow()
@@ -817,7 +868,7 @@ func (ts *TestScript) ReadFile(file string) string {
 		return ts.stderr
 	default:
 		file = ts.MkAbs(file)
-		data, err := ioutil.ReadFile(file)
+		data, err := os.ReadFile(file)
 		ts.Check(err)
 		return string(data)
 	}
@@ -837,7 +888,7 @@ func (ts *TestScript) Getenv(key string) string {
 // parse parses a single line as a list of space-separated arguments
 // subject to environment variable expansion (but not resplitting).
 // Single quotes around text disable splitting and expansion.
-// To embed a single quote, double it: 'Don''t communicate by sharing memory.'
+// To embed a single quote, double it: 'Don”t communicate by sharing memory.'
 func (ts *TestScript) parse(line string) []string {
 	ts.line = line
 
@@ -900,6 +951,7 @@ func removeAll(dir string) error {
 	// make them writable in order to remove content.
 	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			//nolint:nilerr
 			return nil // ignore errors walking in file system
 		}
 		if info.IsDir() {

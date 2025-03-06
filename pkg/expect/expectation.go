@@ -1,7 +1,9 @@
 package expect
 
 import (
+	"fmt"
 	"math/rand"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -11,22 +13,32 @@ import (
 	"github.com/lf-edge/eden/pkg/defaults"
 	"github.com/lf-edge/eden/pkg/device"
 	"github.com/lf-edge/eden/pkg/utils"
-	"github.com/lf-edge/eve/api/go/config"
-	"github.com/lf-edge/eve/api/go/evecommon"
+	"github.com/lf-edge/eve-api/go/config"
+	"github.com/lf-edge/eve-api/go/evecommon"
 	log "github.com/sirupsen/logrus"
 )
 
-//appType is type of app according to provided appLink
+// appType is type of app according to provided appLink
 type appType int
 
 var (
-	dockerApp appType = 1 //for docker application
-	httpApp   appType = 2 //for application with image from http link
-	httpsApp  appType = 3 //for application with image from https link
-	fileApp   appType = 4 //for application with image from file path
+	dockerApp    appType = 1 //for docker application
+	httpApp      appType = 2 //for application with image from http link
+	httpsApp     appType = 3 //for application with image from https link
+	fileApp      appType = 4 //for application with image from file path
+	directoryApp appType = 5 //for application with files from directory
 )
 
-//AppExpectation is description of app, expected to run on EVE
+// ACE is an access control entry (a single entry of ACL).
+type ACE struct {
+	Endpoint string
+	Drop     bool
+}
+
+// ACLs is a map of access control lists assigned to network instances.
+type ACLs map[string][]ACE // network instance -> ACL (list of ACEs)
+
+// AppExpectation is description of app, expected to run on EVE
 type AppExpectation struct {
 	ctrl        controller.Cloud
 	appType     appType
@@ -40,8 +52,11 @@ type AppExpectation struct {
 	mem         uint32
 	metadata    string
 
-	vncDisplay  uint32
+	baseOSVersion string
+
+	vncDisplay  int
 	vncPassword string
+	vncForShimVM bool
 
 	netInstances []*NetInstanceExpectation
 
@@ -64,16 +79,42 @@ type AppExpectation struct {
 	sftpLoad       bool
 
 	disks []string
-	acl   map[string][]string // networkInstanceName -> acls
+	acl   ACLs
+	vlans map[string]int // networkInstanceName -> VID
 
 	openStackMetadata bool
+	profiles          []string
+	datastoreOverride string
+	startDelay        uint32
+	pinCpus           bool
 }
 
-//AppExpectationFromURL init AppExpectation with defined:
-//   appLink - docker url to pull or link to qcow2 image or path to qcow2 image file
-//   podName - name of app
-//   device - device to set updates in volumes and content trees
-//   opts can be used to modify parameters of expectation
+// use provided appLink to try predict format of volume
+func tryPredictAppType(appLink string) string {
+	if len(strings.Split(appLink, "://")) < 2 {
+		fi, err := os.Stat(appLink)
+		if err != nil {
+			log.Warnf("tryPredictAppType: %v", err)
+		} else {
+			switch mode := fi.Mode(); {
+			case mode.IsDir():
+				//appLink is directory
+				return fmt.Sprintf("directory://%s", appLink)
+			case mode.IsRegular():
+				//appLink is file
+				return fmt.Sprintf("file://%s", appLink)
+			}
+		}
+	}
+	return appLink
+}
+
+// AppExpectationFromURL init AppExpectation with defined:
+//
+//	appLink - docker url to pull or link to qcow2 image or path to qcow2 image file
+//	podName - name of app
+//	device - device to set updates in volumes and content trees
+//	opts can be used to modify parameters of expectation
 func AppExpectationFromURL(ctrl controller.Cloud, device *device.Ctx, appLink string, podName string, opts ...ExpectationOption) (expectation *AppExpectation) {
 	var adapter = &config.Adapter{
 		Name: "eth0",
@@ -176,16 +217,17 @@ func AppExpectationFromURL(ctrl controller.Cloud, device *device.Ctx, appLink st
 		}
 	}
 	//generate random name
-	rand.Seed(time.Now().UnixNano())
-	expectation.appName = namesgenerator.GetRandomName(0)
+	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+	expectation.appName = namesgenerator.GetRandomName(rnd.Intn(1))
 	if podName != "" {
 		//set defined name if provided
 		expectation.appName = podName
 	}
+	appLink = tryPredictAppType(appLink)
 	//parse provided appLink to obtain params
 	params := utils.GetParams(appLink, defaults.DefaultPodLinkPattern)
 	if len(params) == 0 {
-		log.Fatalf("fail to parse (oci|docker|http(s)|file)://(<TAG>[:<VERSION>] | <URL> | <PATH>) from argument (%s)", appLink)
+		log.Fatalf("fail to parse (oci|docker|http(s)|file|directory)://(<TAG>[:<VERSION>] | <URL> | <PATH>) from argument (%s)", appLink)
 	}
 	expectation.appType = 0
 	expectation.appURL = ""
@@ -204,6 +246,8 @@ func AppExpectationFromURL(ctrl controller.Cloud, device *device.Ctx, appLink st
 		expectation.appType = httpsApp
 	case "file":
 		expectation.appType = fileApp
+	case "directory":
+		expectation.appType = directoryApp
 	case "":
 		expectation.appType = dockerApp
 	default:

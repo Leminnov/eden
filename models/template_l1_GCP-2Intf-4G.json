@@ -16,9 +16,8 @@
         "Ifname": "eth0"
       },
       "logicallabel": "eth0",
-      "usagePolicy": {
-        "freeUplink": true
-      }
+      "cost": 0,
+      "usagePolicy": {}
     },
     {
       "ztype": 1,
@@ -27,7 +26,8 @@
       "phyaddrs": {
         "Ifname": "eth1"
       },
-      "logicallabel": "eth1"
+      "logicallabel": "eth1",
+      "cost": 0
     }
   ]
 }

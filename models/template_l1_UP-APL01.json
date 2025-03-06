@@ -6,9 +6,9 @@
     "memory": "2G",
     "storage": "32G",
     "Cpus": "2",
-    "hsm": 2,
-    "leds": 4,
-    "watchdog": true
+    "hsm": "2",
+    "leds": "4",
+    "watchdog": "true"
   },
   "logo": {
     "logo_back": "/workspace/spec/logo_back_UP-APL01.png",
@@ -40,9 +40,8 @@
       "usage": 1,
       "phylabel": "eth0",
       "logicallabel": "eth0",
-      "usagePolicy": {
-        "freeUplink": true
-      },
+      "cost": 0,
+      "usagePolicy": {},
       "assigngrp": "eth0",
       "phyaddrs": {
         "Ifname": "eth0",
@@ -54,9 +53,8 @@
       "usage": 1,
       "phylabel": "eth1",
       "logicallabel": "eth1",
-      "usagePolicy": {
-        "freeUplink": true
-      },
+      "cost": 0,
+      "usagePolicy": {},
       "assigngrp": "eth1",
       "phyaddrs": {
         "Ifname": "eth1",

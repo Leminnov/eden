@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/lf-edge/eden/pkg/eve"
-	"github.com/lf-edge/eden/pkg/projects"
+	"github.com/lf-edge/eden/pkg/testcontext"
 	"github.com/lf-edge/eden/pkg/utils"
-	"github.com/lf-edge/eve/api/go/info"
+	"github.com/lf-edge/eve-api/go/info"
 )
 
 type volState struct {
@@ -21,7 +21,8 @@ type volState struct {
 // This test wait for the volume's state with a timewait.
 var (
 	timewait = flag.Duration("timewait", time.Minute, "Timewait for items waiting")
-	tc       *projects.TestContext
+	newitems = flag.Bool("check-new", false, "Check only new info messages")
+	tc       *testcontext.TestContext
 	states   map[string][]volState
 	eveState *eve.State
 )
@@ -33,7 +34,7 @@ var (
 func TestMain(m *testing.M) {
 	fmt.Println("Docker volume's state test")
 
-	tc = projects.NewTestContext()
+	tc = testcontext.NewTestContext()
 
 	projectName := fmt.Sprintf("%s_%s", "TestVolState", time.Now())
 
@@ -65,6 +66,7 @@ func checkNewLastState(volName, state string) bool {
 func checkAndAppendState(volName, state string) {
 	if checkNewLastState(volName, state) {
 		states[volName] = append(states[volName], volState{state: state, timestamp: time.Now()})
+		fmt.Println(utils.AddTimestamp(fmt.Sprintf("\tvolName %s state changed to %s", volName, state)))
 	}
 }
 
@@ -112,16 +114,16 @@ func checkState(eveState *eve.State, state string, volNames []string) error {
 	return nil
 }
 
-//checkVol wait for info of ZInfoApp type with state
-func checkVol(state string, volNames []string) projects.ProcInfoFunc {
+// checkVol wait for info of ZInfoApp type with state
+func checkVol(state string, volNames []string) testcontext.ProcInfoFunc {
 	return func(msg *info.ZInfoMsg) error {
-		eveState.InfoCallback()(msg, nil) //feed state with new info
+		eveState.InfoCallback()(msg) //feed state with new info
 		return checkState(eveState, state, volNames)
 	}
 }
 
-//TestVolStatus wait for application reaching the selected state
-//with a timewait
+// TestVolStatus wait for application reaching the selected state
+// with a timewait
 func TestVolStatus(t *testing.T) {
 	edgeNode := tc.GetEdgeNode(tc.WithTest(t))
 
@@ -135,14 +137,22 @@ func TestVolStatus(t *testing.T) {
 			args[1:], state, secs)))
 
 		vols := args[1:]
+		if vols[len(vols)-1] == "&" {
+			vols = vols[:len(vols)-1]
+		}
 		states = make(map[string][]volState)
 		for _, el := range vols {
+			if el == "&" {
+				continue
+			}
 			states[el] = []volState{{state: "no info from controller", timestamp: time.Now()}}
 		}
 
-		// observe existing info object and feed them into eveState object
-		if err := tc.GetController().InfoLastCallback(edgeNode.GetID(), nil, eveState.InfoCallback()); err != nil {
-			t.Fatal(err)
+		if !*newitems {
+			// observe existing info object and feed them into eveState object
+			if err := tc.GetController().InfoLastCallback(edgeNode.GetID(), nil, eveState.InfoCallback()); err != nil {
+				t.Fatal(err)
+			}
 		}
 
 		// we are done if our eveState object is in required state

@@ -13,12 +13,13 @@ import (
 	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/dustin/go-humanize"
 	"github.com/lf-edge/eden/pkg/controller/eapps"
+	"github.com/lf-edge/eden/pkg/controller/types"
 	"github.com/lf-edge/eden/pkg/device"
 	"github.com/lf-edge/eden/pkg/expect"
-	"github.com/lf-edge/eden/pkg/projects"
+	"github.com/lf-edge/eden/pkg/testcontext"
 	"github.com/lf-edge/eden/pkg/utils"
-	"github.com/lf-edge/eve/api/go/config"
-	"github.com/lf-edge/eve/api/go/info"
+	"github.com/lf-edge/eve-api/go/config"
+	"github.com/lf-edge/eve-api/go/info"
 	uuid "github.com/satori/go.uuid"
 	log "github.com/sirupsen/logrus"
 )
@@ -43,7 +44,7 @@ var (
 	appLink      = flag.String("applink", "https://cloud-images.ubuntu.com/releases/groovy/release-20210108/ubuntu-20.10-server-cloudimg-%s.img", "Link to qcow2 image. You can pass %s for automatically set of arch (amd64/arm64)")
 	doPanic      = flag.Bool("panic", false, "Test kernel panic")
 	doLogger     = flag.Bool("logger", false, "Test logger print to console")
-	tc           *projects.TestContext
+	tc           *testcontext.TestContext
 	externalIP   string
 	externalPort int
 	appName      string
@@ -56,7 +57,7 @@ var (
 func TestMain(m *testing.M) {
 	fmt.Println("VNC access to app Test")
 
-	tc = projects.NewTestContext()
+	tc = testcontext.NewTestContext()
 
 	projectName := fmt.Sprintf("%s_%s", "TestVNCAccess", time.Now())
 
@@ -71,34 +72,36 @@ func TestMain(m *testing.M) {
 	os.Exit(res)
 }
 
-func setAppName(){
+func setAppName() {
 	if appName == "" { //if previous appName not defined
 		if *name == "" {
-			rand.Seed(time.Now().UnixNano())
-			appName = namesgenerator.GetRandomName(0) //generates new name if no flag set
+			rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+			appName = namesgenerator.GetRandomName(rnd.Intn(1)) //generates new name if no flag set
 		} else {
 			appName = *name
 		}
 	}
 }
 
-//getVNCPort calculate port for vnc
-//for qemu it is forwarded
-//for rpi it is direct
-func getVNCPort(edgeNode *device.Ctx, vncDisplay int) int {
-	if edgeNode.GetRemote() {
-		return 5900 + vncDisplay
-	}
-	return 5910 + vncDisplay //forwarded by qemu ports
+// getVNCPort calculate port for vnc
+// for qemu it is forwarded
+// for rpi it is direct
+func getVNCPort(vncDisplay int) int {
+	return 5900 + vncDisplay
 }
 
-//checkAppRunning wait for info of ZInfoApp type with mention of deployed AppName and ZSwState_RUNNING state
-func checkAppRunning(appName string) projects.ProcInfoFunc {
+// checkAppRunning wait for info of ZInfoApp type with mention of deployed AppName and ZSwState_RUNNING state
+func checkAppRunning(t *testing.T, appName string) testcontext.ProcInfoFunc {
+	lastState := info.ZSwState_INVALID
 	return func(msg *info.ZInfoMsg) error {
 		if msg.Ztype == info.ZInfoTypes_ZiApp {
 			if msg.GetAinfo().AppName == appName {
-				if msg.GetAinfo().State == info.ZSwState_RUNNING {
-					return fmt.Errorf("app RUNNING with name %s", appName)
+				if lastState != msg.GetAinfo().State {
+					lastState = msg.GetAinfo().State
+					t.Logf("\t\tstate: %s received in: %s", lastState, time.Now().Format(time.RFC3339Nano))
+					if lastState == info.ZSwState_RUNNING {
+						return fmt.Errorf("app RUNNING with name %s", appName)
+					}
 				}
 			}
 		}
@@ -106,8 +109,8 @@ func checkAppRunning(appName string) projects.ProcInfoFunc {
 	}
 }
 
-//getEVEIP wait for IPs of EVE and returns them
-func getEVEIP(edgeNode *device.Ctx) projects.ProcTimerFunc {
+// getEVEIP wait for IPs of EVE and returns them
+func getEVEIP(edgeNode *device.Ctx) testcontext.ProcTimerFunc {
 	return func() error {
 		if edgeNode.GetRemoteAddr() == "" { //no eve.remote-addr defined
 			eveIPCIDR, err := tc.GetState(edgeNode).LookUp("Dinfo.Network[0].IPAddrs[0]")
@@ -126,22 +129,50 @@ func getEVEIP(edgeNode *device.Ctx) projects.ProcTimerFunc {
 	}
 }
 
-//checkVNCAccess try to access APP via VNC with timer
-func checkVNCAccess() projects.ProcTimerFunc {
+// checkVNCAccess try to access APP via VNC with timer
+func checkVNCAccess(edgeNode *device.Ctx) testcontext.ProcTimerFunc {
 	return func() error {
-		if externalIP == "" {
-			return nil
+		if edgeNode.GetRemote() {
+			if externalIP == "" {
+				return nil
+			}
+			desktopName, err := utils.GetDesktopName(fmt.Sprintf("%s:%d", externalIP, externalPort), *vncPassword)
+			if err != nil {
+				return nil
+			}
+			return fmt.Errorf("VNC DesktopName: %s. You can access it via VNC on %s:%d with password %s", desktopName, externalIP, externalPort, *vncPassword)
 		}
-		desktopName, err := utils.GetDesktopName(fmt.Sprintf("%s:%d", externalIP, externalPort), *vncPassword)
-		if err != nil {
-			return nil
-		}
-		return fmt.Errorf("VNC DesktopName: %s. You can access it via VNC on %s:%d with password %s", desktopName, externalIP, externalPort, *vncPassword)
+		return tc.PortForwardCommand(func(fwdPort uint16) error {
+			desktopName, err := utils.GetDesktopName(fmt.Sprintf("127.0.0.1:%d", fwdPort), *vncPassword)
+			if err != nil {
+				return nil
+			}
+			return fmt.Errorf("VNC DesktopName: %s. You can access it via VNC on %s:%d with password %s", desktopName, externalIP, externalPort, *vncPassword)
+		}, "eth0", uint16(externalPort))
 	}
 }
 
-//checkAppAbsent check if APP undefined in EVE
-func checkAppAbsent(appName string) projects.ProcInfoFunc {
+func sshCommand(edgeNode *device.Ctx, command string, foreground bool) testcontext.ProcTimerFunc {
+	return func() error {
+		if edgeNode.GetRemote() {
+			if externalIP == "" {
+				return nil
+			}
+			sendSSHCommand := testcontext.SendCommandSSH(&externalIP, sshPort, "ubuntu", "passw0rd", command, foreground)
+			return sendSSHCommand()
+		}
+		return tc.PortForwardCommand(func(fwdPort uint16) error {
+			localhostIP := "127.0.0.1"
+			sshPort := int(fwdPort)
+			sendSSHCommand := testcontext.SendCommandSSH(&localhostIP, &sshPort, "ubuntu", "passw0rd", command, foreground)
+			return sendSSHCommand()
+		}, "eth0", uint16(*sshPort))
+	}
+}
+
+// checkAppAbsent check if APP undefined in EVE
+func checkAppAbsent(t *testing.T, appName string) testcontext.ProcInfoFunc {
+	lastState := info.ZSwState_INVALID
 	return func(msg *info.ZInfoMsg) error {
 		if msg.Ztype == info.ZInfoTypes_ZiDevice {
 			for _, app := range msg.GetDinfo().AppInstances {
@@ -151,14 +182,22 @@ func checkAppAbsent(appName string) projects.ProcInfoFunc {
 			}
 			return fmt.Errorf("no app with %s found", appName)
 		}
+		if msg.Ztype == info.ZInfoTypes_ZiApp {
+			if msg.GetAinfo().AppName == appName {
+				if lastState != msg.GetAinfo().State {
+					lastState = msg.GetAinfo().State
+					t.Logf("\t\tstate: %s received in: %s", lastState, time.Now().Format(time.RFC3339Nano))
+				}
+			}
+		}
 		return nil
 	}
 }
 
-//TestVNCVMStart gets EdgeNode and deploys app, defined in appLink with VncDisplay
-//it generates random appName and adds processing functions
-//it checks if app processed by EVE, app in RUNNING state, VNC and SSH of app is accessible
-//it uses timewait for processing all events
+// TestVNCVMStart gets EdgeNode and deploys app, defined in appLink with VncDisplay
+// it generates random appName and adds processing functions
+// it checks if app processed by EVE, app in RUNNING state, VNC and SSH of app is accessible
+// it uses timewait for processing all events
 func TestVNCVMStart(t *testing.T) {
 
 	edgeNode := tc.GetEdgeNode(tc.WithTest(t))
@@ -183,7 +222,7 @@ func TestVNCVMStart(t *testing.T) {
 
 	opts = append(opts, expect.WithMetadata(*metadata))
 
-	opts = append(opts, expect.WithVnc(uint32(*vncDisplay)))
+	opts = append(opts, expect.WithVnc(*vncDisplay))
 
 	opts = append(opts, expect.WithVncPassword(*vncPassword))
 
@@ -201,7 +240,7 @@ func TestVNCVMStart(t *testing.T) {
 
 	appInstanceConfig := expectation.Application()
 
-	externalPort = getVNCPort(edgeNode, *vncDisplay)
+	externalPort = getVNCPort(*vncDisplay)
 
 	t.Log("Add app to list")
 
@@ -211,7 +250,7 @@ func TestVNCVMStart(t *testing.T) {
 
 	t.Log("Add processing of app running messages")
 
-	tc.AddProcInfo(edgeNode, checkAppRunning(appName))
+	tc.AddProcInfo(edgeNode, checkAppRunning(t, appName))
 
 	appID, err := uuid.FromString(appInstanceConfig.Uuidandversion.Uuid)
 	if err != nil {
@@ -220,7 +259,7 @@ func TestVNCVMStart(t *testing.T) {
 
 	callback := func() {
 		fmt.Printf("--- app %s logs ---\n", appInstanceConfig.Displayname)
-		if err = tc.GetController().LogAppsChecker(edgeNode.GetID(), appID, nil, eapps.HandleFactory(eapps.LogJSON, false), eapps.LogExist, 0); err != nil {
+		if err = tc.GetController().LogAppsChecker(edgeNode.GetID(), appID, nil, eapps.HandleFactory(types.OutputFormatJSON, false), eapps.LogExist, 0); err != nil {
 			t.Fatalf("LogAppsChecker: %s", err)
 		}
 		fmt.Println("------")
@@ -243,7 +282,7 @@ func getAppInstanceConfig(edgeNode *device.Ctx, appName string) *config.AppInsta
 	return appInstanceConfig
 }
 
-//TestAccess checks if VNC and SSH of app is accessible
+// TestAccess checks if VNC and SSH of app is accessible
 func TestAccess(t *testing.T) {
 
 	edgeNode := tc.GetEdgeNode(tc.WithTest(t))
@@ -267,19 +306,19 @@ func TestAccess(t *testing.T) {
 
 	t.Log(utils.AddTimestamp("Add trying to access VNC of app"))
 
-	externalPort = getVNCPort(edgeNode, *vncDisplay)
+	externalPort = getVNCPort(*vncDisplay)
 
-	tc.AddProcTimer(edgeNode, checkVNCAccess())
+	tc.AddProcTimer(edgeNode, checkVNCAccess(edgeNode))
 
 	t.Log(utils.AddTimestamp("Add trying to access SSH of app"))
 
-	tc.AddProcTimer(edgeNode, projects.SendCommandSSH(&externalIP, sshPort, "ubuntu", "passw0rd", "exit", true))
+	tc.AddProcTimer(edgeNode, sshCommand(edgeNode, "exit", true))
 
 	tc.ExpandOnSuccess(int(expand.Seconds()))
 
 	callback := func() {
 		fmt.Printf("--- app %s logs ---\n", appInstanceConfig.Displayname)
-		if err = tc.GetController().LogAppsChecker(edgeNode.GetID(), appID, nil, eapps.HandleFactory(eapps.LogJSON, false), eapps.LogExist, 0); err != nil {
+		if err = tc.GetController().LogAppsChecker(edgeNode.GetID(), appID, nil, eapps.HandleFactory(types.OutputFormatJSON, false), eapps.LogExist, 0); err != nil {
 			t.Fatalf("LogAppsChecker: %s", err)
 		}
 		fmt.Println("------")
@@ -289,7 +328,7 @@ func TestAccess(t *testing.T) {
 
 }
 
-//TestAppLogs checks if logs of app is accessible
+// TestAppLogs checks if logs of app is accessible
 func TestAppLogs(t *testing.T) {
 
 	edgeNode := tc.GetEdgeNode(tc.WithTest(t))
@@ -306,7 +345,7 @@ func TestAppLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	panicCmd := projects.SendCommandSSH(&externalIP, sshPort, "ubuntu", "passw0rd", "sudo su -c 'echo c > /proc/sysrq-trigger'", false)
+	panicCmd := sshCommand(edgeNode, "sudo su -c 'echo c > /proc/sysrq-trigger'", false)
 	if *doLogger {
 		fmt.Println("will wait for uptime logs in test")
 		callback := func() {
@@ -315,7 +354,7 @@ func TestAppLogs(t *testing.T) {
 			}
 		}
 		tc.AddProcTimer(edgeNode, tc.CheckMessageInAppLog(edgeNode, appID, "uptime: ", callback))
-		tc.AddProcTimer(edgeNode, projects.SendCommandSSH(&externalIP, sshPort, "ubuntu", "passw0rd", "sudo su -c 'echo uptime: `uptime`>/dev/console'", true)) //prints uptime to /dev/console
+		tc.AddProcTimer(edgeNode, sshCommand(edgeNode, "sudo su -c 'echo uptime: `uptime`>/dev/console'", true)) //prints uptime to /dev/console
 	}
 	if *doPanic {
 		fmt.Println("will fire kernel panic in test")
@@ -332,9 +371,9 @@ func TestAppLogs(t *testing.T) {
 	tc.WaitForProc(int(timewait.Seconds()))
 }
 
-//TestVNCVMDelete gets EdgeNode and deletes previously deployed app, defined in appName or in name flag
-//it checks if app absent in EVE
-//it uses timewait for processing all events
+// TestVNCVMDelete gets EdgeNode and deletes previously deployed app, defined in appName or in name flag
+// it checks if app absent in EVE
+// it uses timewait for processing all events
 func TestVNCVMDelete(t *testing.T) {
 
 	edgeNode := tc.GetEdgeNode(tc.WithTest(t))
@@ -343,7 +382,7 @@ func TestVNCVMDelete(t *testing.T) {
 
 	t.Log(utils.AddTimestamp(fmt.Sprintf("Add waiting for app %s absent", appName)))
 
-	tc.AddProcInfo(edgeNode, checkAppAbsent(appName))
+	tc.AddProcInfo(edgeNode, checkAppAbsent(t, appName))
 
 	for id, appUUID := range edgeNode.GetApplicationInstances() {
 		appConfig, _ := tc.GetController().GetApplicationInstanceConfig(appUUID)

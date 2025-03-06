@@ -8,11 +8,12 @@ import (
 	"time"
 
 	"github.com/lf-edge/eden/pkg/controller/eapps"
+	"github.com/lf-edge/eden/pkg/controller/types"
 	"github.com/lf-edge/eden/pkg/eve"
-	"github.com/lf-edge/eden/pkg/projects"
+	"github.com/lf-edge/eden/pkg/testcontext"
 	"github.com/lf-edge/eden/pkg/tests"
 	"github.com/lf-edge/eden/pkg/utils"
-	"github.com/lf-edge/eve/api/go/info"
+	"github.com/lf-edge/eve-api/go/info"
 	uuid "github.com/satori/go.uuid"
 )
 
@@ -24,7 +25,8 @@ type appState struct {
 // This test wait for the app's state with a timewait.
 var (
 	timewait = flag.Duration("timewait", 10*time.Minute, "Timewait for items waiting")
-	tc       *projects.TestContext
+	newitems = flag.Bool("check-new", false, "Check only new info messages")
+	tc       *testcontext.TestContext
 	states   map[string][]appState
 	eveState *eve.State
 )
@@ -38,7 +40,7 @@ func TestMain(m *testing.M) {
 
 	tests.TestArgsParse()
 
-	tc = projects.NewTestContext()
+	tc = testcontext.NewTestContext()
 
 	projectName := fmt.Sprintf("%s_%s", "TestAppState", time.Now())
 
@@ -48,7 +50,7 @@ func TestMain(m *testing.M) {
 
 	eveState = eve.Init(tc.GetController(), tc.GetEdgeNode())
 
-	tc.StartTrackingState(false)
+	tc.StartTrackingState(true)
 
 	res := m.Run()
 
@@ -60,6 +62,13 @@ func checkNewLastState(appName, state string) bool {
 	appStates, ok := states[appName]
 	if ok {
 		lastState := appStates[len(appStates)-1]
+		// PURGING and RESTARTING are not published by EVE since 12.3
+		if state == "PURGING" || state == "RESTARTING" {
+			if lastState.state == "HALTING" {
+				// The expected state was reached.
+				return false
+			}
+		}
 		if lastState.state != state {
 			return true
 		}
@@ -73,6 +82,7 @@ func checkAndAppendState(appName, state string) {
 			state:     state,
 			timestamp: time.Now(),
 		})
+		fmt.Println(utils.AddTimestamp(fmt.Sprintf("\tappName %s state changed to %s", appName, state)))
 	}
 }
 
@@ -120,16 +130,16 @@ func checkState(eveState *eve.State, state string, appNames []string) error {
 	return nil
 }
 
-//checkApp wait for info of ZInfoApp type with state
-func checkApp(state string, appNames []string) projects.ProcInfoFunc {
+// checkApp wait for info of ZInfoApp type with state
+func checkApp(state string, appNames []string) testcontext.ProcInfoFunc {
 	return func(msg *info.ZInfoMsg) error {
-		eveState.InfoCallback()(msg, nil) //feed state with new info
+		eveState.InfoCallback()(msg) //feed state with new info
 		return checkState(eveState, state, appNames)
 	}
 }
 
-//TestAppStatus wait for application reaching the selected state
-//with a timewait
+// TestAppStatus wait for application reaching the selected state
+// with a timewait
 func TestAppStatus(t *testing.T) {
 	edgeNode := tc.GetEdgeNode(tc.WithTest(t))
 
@@ -143,6 +153,9 @@ func TestAppStatus(t *testing.T) {
 			args[1:], state, secs)
 
 		apps := args[1:]
+		if apps[len(apps)-1] == "&" {
+			apps = apps[:len(apps)-1]
+		}
 		states = make(map[string][]appState)
 		for _, el := range apps {
 			states[el] = []appState{{
@@ -150,35 +163,48 @@ func TestAppStatus(t *testing.T) {
 				timestamp: time.Now()}}
 		}
 
-		tc.AddProcInfo(edgeNode, checkApp(state, apps))
-
-		callback := func() {
-			t.Errorf("ASSERTION FAILED (%s): expected apps %s in %s state", time.Now().Format(time.RFC3339Nano), apps, state)
-			for k, v := range states {
-				t.Errorf("\tactual %s: %s", k, v[len(v)-1].state)
-				if checkNewLastState(k, state) {
-					t.Errorf("\thistory of states for %s:", k)
-					for _, st := range v {
-						t.Errorf("\t\tstate: %s received in: %s", st.state, st.timestamp.Format(time.RFC3339Nano))
-					}
-				}
-				for _, app := range eveState.Applications() {
-					if app.Name == k {
-						appID, err := uuid.FromString(app.UUID)
-						if err != nil {
-							t.Fatal(err)
-						}
-						fmt.Printf("--- app %s logs ---\n", app.Name)
-						if err = tc.GetController().LogAppsChecker(edgeNode.GetID(), appID, nil, eapps.HandleFactory(eapps.LogJSON, false), eapps.LogExist, 0); err != nil {
-							t.Fatalf("LogAppsChecker: %s", err)
-						}
-						fmt.Println("------")
-					}
-				}
+		if !*newitems {
+			// observe existing info object and feed them into eveState object
+			if err := tc.GetController().InfoLastCallback(edgeNode.GetID(), nil, eveState.InfoCallback()); err != nil {
+				t.Fatal(err)
 			}
 		}
 
-		tc.WaitForProcWithErrorCallback(secs, callback)
+		if ready := checkState(eveState, state, apps); ready == nil {
+
+			tc.AddProcInfo(edgeNode, checkApp(state, apps))
+
+			callback := func() {
+				t.Errorf("ASSERTION FAILED (%s): expected apps %s in %s state", time.Now().Format(time.RFC3339Nano), apps, state)
+				for k, v := range states {
+					t.Errorf("\tactual %s: %s", k, v[len(v)-1].state)
+					if checkNewLastState(k, state) {
+						t.Errorf("\thistory of states for %s:", k)
+						for _, st := range v {
+							t.Errorf("\t\tstate: %s received in: %s", st.state, st.timestamp.Format(time.RFC3339Nano))
+						}
+					}
+					for _, app := range eveState.Applications() {
+						if app.Name == k {
+							appID, err := uuid.FromString(app.UUID)
+							if err != nil {
+								t.Fatal(err)
+							}
+							fmt.Printf("--- app %s logs ---\n", app.Name)
+							if err = tc.GetController().LogAppsChecker(edgeNode.GetID(), appID, nil, eapps.HandleFactory(types.OutputFormatJSON, false), eapps.LogExist, 0); err != nil {
+								t.Fatalf("LogAppsChecker: %s", err)
+							}
+							fmt.Println("------")
+						}
+					}
+				}
+			}
+
+			tc.WaitForProcWithErrorCallback(secs, callback)
+
+		} else {
+			t.Log(utils.AddTimestamp(ready.Error()))
+		}
 
 		// sleep to reduce concurrency effects
 		time.Sleep(1 * time.Second)

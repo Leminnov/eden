@@ -2,12 +2,13 @@ package utils
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -20,7 +21,7 @@ import (
 
 var viperAccessMutex sync.RWMutex
 
-//ConfigVars struct with parameters from config file
+// ConfigVars struct with parameters from config file
 type ConfigVars struct {
 	AdamIP            string
 	AdamPort          string
@@ -57,11 +58,13 @@ type ConfigVars struct {
 	EServerImageDist  string
 	EServerPort       string
 	EServerIP         string
+	RegistryIP        string
+	RegistryPort      string
 	LogLevel          string
 	AdamLogLevel      string
 }
 
-//InitVars loads vars from viper
+// InitVars loads vars from viper
 func InitVars() (*ConfigVars, error) {
 	loaded := true
 	if viper.ConfigFileUsed() == "" {
@@ -122,12 +125,14 @@ func InitVars() (*ConfigVars, error) {
 			EServerImageDist:  ResolveAbsPath(viper.GetString("eden.images.dist")),
 			EServerPort:       viper.GetString("eden.eserver.port"),
 			EServerIP:         viper.GetString("eden.eserver.ip"),
+			RegistryIP:        viper.GetString("registry.ip"),
+			RegistryPort:      viper.GetString("registry.port"),
 			LogLevel:          viper.GetString("eve.log-level"),
 			AdamLogLevel:      viper.GetString("eve.adam-log-level"),
 		}
 		viperAccessMutex.RUnlock()
 		redisPasswordFile := filepath.Join(globalCertsDir, defaults.DefaultRedisPasswordFile)
-		pwd, err := ioutil.ReadFile(redisPasswordFile)
+		pwd, err := os.ReadFile(redisPasswordFile)
 		if err == nil {
 			vars.AdamRedisURLEden = fmt.Sprintf("redis://%s:%s@%s", string(pwd), string(pwd), vars.AdamRedisURLEden)
 		} else {
@@ -139,7 +144,7 @@ func InitVars() (*ConfigVars, error) {
 	return nil, nil
 }
 
-//DefaultEdenDir returns path to default directory
+// DefaultEdenDir returns path to default directory
 func DefaultEdenDir() (string, error) {
 	usr, err := user.Current()
 	if err != nil {
@@ -148,7 +153,7 @@ func DefaultEdenDir() (string, error) {
 	return filepath.Join(usr.HomeDir, defaults.DefaultEdenHomeDir), nil
 }
 
-//GetConfig return path to config file
+// GetConfig return path to config file
 func GetConfig(name string) string {
 	edenDir, err := DefaultEdenDir()
 	if err != nil {
@@ -157,7 +162,7 @@ func GetConfig(name string) string {
 	return filepath.Join(edenDir, defaults.DefaultContextDirectory, fmt.Sprintf("%s.yml", name))
 }
 
-//DefaultConfigPath returns path to default config
+// DefaultConfigPath returns path to default config
 func DefaultConfigPath() (string, error) {
 	context, err := ContextLoad()
 	if err != nil {
@@ -166,7 +171,7 @@ func DefaultConfigPath() (string, error) {
 	return context.GetCurrentConfig(), nil
 }
 
-//CurrentDirConfigPath returns path to eden-config.yml in current folder
+// CurrentDirConfigPath returns path to eden-config.yml in current folder
 func CurrentDirConfigPath() (string, error) {
 	currentPath, err := os.Getwd()
 	if err != nil {
@@ -230,21 +235,21 @@ func loadConfigFile(config string, local bool) (loaded bool, err error) {
 	return true, nil
 }
 
-//LoadConfigFile load config from file with viper
+// LoadConfigFile load config from file with viper
 func LoadConfigFile(config string) (loaded bool, err error) {
 	viperAccessMutex.Lock()
 	defer viperAccessMutex.Unlock()
 	return loadConfigFile(config, true)
 }
 
-//LoadConfigFileContext load config from context file with viper
+// LoadConfigFileContext load config from context file with viper
 func LoadConfigFileContext(config string) (loaded bool, err error) {
 	viperAccessMutex.Lock()
 	defer viperAccessMutex.Unlock()
 	return loadConfigFile(config, false)
 }
 
-//GenerateConfigFile is a function to generate default yml
+// GenerateConfigFile is a function to generate default yml
 func GenerateConfigFile(filePath string) error {
 	context, err := ContextInit()
 	if err != nil {
@@ -286,6 +291,26 @@ func generateConfigFileFromTemplate(filePath string, templateString string, cont
 
 	certsDist := fmt.Sprintf("%s-%s", context.Current, defaults.DefaultCertsDist)
 
+	parseMap := func(inp string) interface{} {
+		switch inp {
+		case "eve.hostfwd":
+			defaultPortForward := map[string]string{
+				strconv.Itoa(defaults.DefaultSSHPort): "22",
+				"5911":                                "5901",
+				"5912":                                "5902",
+				"8027":                                "8027",
+				"8028":                                "8028",
+			}
+			result, err := json.Marshal(defaultPortForward)
+			if err != nil {
+				log.Fatal(err)
+			}
+			return string(result)
+		default:
+			log.Fatalf("Not found argument %s in config", inp)
+		}
+		return ""
+	}
 	parse := func(inp string) interface{} {
 		switch inp {
 		case "adam.tag":
@@ -329,6 +354,8 @@ func generateConfigFileFromTemplate(filePath string, templateString string, cont
 			return ""
 		case "eve.arch":
 			return runtime.GOARCH
+		case "eve.platform":
+			return defaults.DefaultEVEPlatform
 		case "eve.os":
 			return runtime.GOOS
 		case "eve.accel":
@@ -346,17 +373,18 @@ func generateConfigFileFromTemplate(filePath string, templateString string, cont
 		case "eve.log":
 			return fmt.Sprintf("%s-eve.log", strings.ToLower(context.Current))
 		case "eve.firmware":
-			return fmt.Sprintf("[%s %s]",
-				filepath.Join(imageDist, "eve", "OVMF_CODE.fd"),
-				filepath.Join(imageDist, "eve", "OVMF_VARS.fd"))
+			if runtime.GOARCH == "amd64" {
+				return fmt.Sprintf("[%s %s]",
+					filepath.Join(imageDist, "eve", "firmware", "OVMF_CODE.fd"),
+					filepath.Join(imageDist, "eve", "firmware", "OVMF_VARS.fd"))
+			}
+			return fmt.Sprintf("[%s]", filepath.Join(imageDist, "eve", "firmware", "OVMF.fd"))
 		case "eve.repo":
 			return defaults.DefaultEveRepo
 		case "eve.registry":
 			return defaults.DefaultEveRegistry
 		case "eve.tag":
 			return defaults.DefaultEVETag
-		case "eve.hostfwd":
-			return fmt.Sprintf("{\"%d\":\"22\",\"5912\":\"5902\",\"5911\":\"5901\",\"8027\":\"8027\",\"8028\":\"8028\"}", defaults.DefaultSSHPort)
 		case "eve.dist":
 			return fmt.Sprintf("%s-%s", context.Current, defaults.DefaultEVEDist)
 		case "eve.qemu-config":
@@ -365,6 +393,10 @@ func generateConfigFileFromTemplate(filePath string, templateString string, cont
 			return id.String()
 		case "eve.image-file":
 			return filepath.Join(imageDist, "eve", "live.img")
+		case "eve.custom-installer.path":
+			return ""
+		case "eve.custom-installer.format":
+			return ""
 		case "eve.dtb-part":
 			return ""
 		case "eve.config-part":
@@ -380,6 +412,24 @@ func generateConfigFileFromTemplate(filePath string, templateString string, cont
 		case "eve.telnet-port":
 			return defaults.DefaultTelnetPort
 		case "eve.ssid":
+			return ""
+		case "eve.qemu.monitor-port":
+			return defaults.DefaultQemuMonitorPort
+		case "eve.qemu.netdev-socket-port":
+			return defaults.DefaultQemuNetdevSocketPort
+		case "eve.cpu":
+			return defaults.DefaultCpus
+		case "eve.ram":
+			return defaults.DefaultMemory
+		case "eve.disk":
+			return defaults.DefaultEVEImageSize
+		case "eve.tpm":
+			return defaults.DefaultTPMEnabled
+		case "eve.disks":
+			return defaults.DefaultAdditionalDisks
+		case "eve.bootstrap-file":
+			return ""
+		case "eve.usbnetconf-file":
 			return ""
 
 		case "eden.root":
@@ -400,6 +450,10 @@ func generateConfigFileFromTemplate(filePath string, templateString string, cont
 			return defaults.DefaultEServerTag
 		case "eden.eserver.force":
 			return true
+		case "eden.eclient.tag":
+			return defaults.DefaultEClientTag
+		case "eden.eclient.image":
+			return defaults.DefaultEClientContainerRef
 		case "eden.certs-dist":
 			return certsDist
 		case "eden.bin-dist":
@@ -414,6 +468,9 @@ func generateConfigFileFromTemplate(filePath string, templateString string, cont
 			return defaults.DefaultTestScenario
 
 		case "gcp.key":
+			return ""
+
+		case "packet.key":
 			return ""
 
 		case "redis.port":
@@ -431,13 +488,42 @@ func generateConfigFileFromTemplate(filePath string, templateString string, cont
 			return ip
 		case "registry.dist":
 			return defaults.DefaultRegistryDist
+
+		case "sdn.disable":
+			return true
+		case "sdn.source-dir":
+			return filepath.Join(currentPath, "sdn")
+		case "sdn.config-dir":
+			return filepath.Join(edenDir, fmt.Sprintf("%s-sdn", context.Current))
+		case "sdn.image-file":
+			return filepath.Join(imageDist, "eden", "sdn-efi.qcow2")
+		case "sdn.linuxkit-bin":
+			return filepath.Join(currentPath, defaults.DefaultBuildtoolsDir, "linuxkit")
+		case "sdn.cpu":
+			return defaults.DefaultSdnCpus
+		case "sdn.ram":
+			return defaults.DefaultSdnMemory
+		case "sdn.pid":
+			return filepath.Join(currentPath, defaults.DefaultDist, "sdn.pid")
+		case "sdn.console-log":
+			return filepath.Join(currentPath, defaults.DefaultDist, "sdn-console.log")
+		case "sdn.telnet-port":
+			return defaults.DefaultSdnTelnetPort
+		case "sdn.ssh-port":
+			return defaults.DefaultSdnSSHPort
+		case "sdn.mgmt-port":
+			return defaults.DefaultSdnMgmtPort
+		case "sdn.network-model":
+			return ""
+
 		default:
 			log.Fatalf("Not found argument %s in config", inp)
 		}
 		return ""
 	}
 	var fm = template.FuncMap{
-		"parse": parse,
+		"parse":    parse,
+		"parsemap": parseMap,
 	}
 	t := template.New("t").Funcs(fm)
 	_, err = t.Parse(templateString)
@@ -474,8 +560,16 @@ func generateConfigFileFromViperTemplate(filePath string, templateString string)
 		log.Warnf("Not found argument %s in config", inp)
 		return ""
 	}
+	parseMap := func(inp string) interface{} {
+		result, err := json.Marshal(parse(inp))
+		if err != nil {
+			log.Fatalf("cannot parse %s: %s", inp, err)
+		}
+		return string(result)
+	}
 	var fm = template.FuncMap{
-		"parse": parse,
+		"parse":    parse,
+		"parsemap": parseMap,
 	}
 	t := template.New("t").Funcs(fm)
 	_, err = t.Parse(templateString)
@@ -494,7 +588,7 @@ func generateConfigFileFromViperTemplate(filePath string, templateString string)
 	return nil
 }
 
-//GenerateConfigFileFromViper is a function to generate yml from viper config
+// GenerateConfigFileFromViper is a function to generate yml from viper config
 func GenerateConfigFileFromViper() error {
 	configFile, err := DefaultConfigPath()
 	if err != nil {
@@ -503,7 +597,7 @@ func GenerateConfigFileFromViper() error {
 	return generateConfigFileFromViperTemplate(configFile, defaults.DefaultEdenTemplate)
 }
 
-//GenerateConfigFileDiff is a function to generate diff yml for new context
+// GenerateConfigFileDiff is a function to generate diff yml for new context
 func GenerateConfigFileDiff(filePath string, context *Context) error {
 	return generateConfigFileFromTemplate(filePath, defaults.DefaultEdenTemplate, context)
 }

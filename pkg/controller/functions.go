@@ -3,9 +3,7 @@ package controller
 import (
 	"crypto/sha1"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,14 +14,15 @@ import (
 	"github.com/lf-edge/eden/pkg/device"
 	"github.com/lf-edge/eden/pkg/models"
 	"github.com/lf-edge/eden/pkg/utils"
-	"github.com/lf-edge/eve/api/go/config"
+	"github.com/lf-edge/eve-api/go/config"
 	uuid "github.com/satori/go.uuid"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/term"
+	"google.golang.org/protobuf/proto"
 )
 
-//CloudPrepare is for init controller connection and obtain device list
+// CloudPrepare is for init controller connection and obtain device list
 func CloudPrepare() (Cloud, error) {
 	vars, err := utils.InitVars()
 	if err != nil {
@@ -37,17 +36,36 @@ func CloudPrepare() (Cloud, error) {
 	return ctx, nil
 }
 
-//GetVars returns variables of controller
+// GetVars returns variables of controller
 func (cloud *CloudCtx) GetVars() *utils.ConfigVars {
 	return cloud.vars
 }
 
-//SetVars sets variables of controller
+// SetVars sets variables of controller
 func (cloud *CloudCtx) SetVars(vars *utils.ConfigVars) {
 	cloud.vars = vars
 }
 
-//OnBoardDev in controller
+// ResetDev to initial config in controller
+func (cloud *CloudCtx) ResetDev(node *device.Ctx) error {
+	vars := cloud.GetVars()
+	node.SetApplicationInstanceConfig(nil)
+	node.SetBaseOSConfig(nil)
+	node.SetBaseOSContentTree("")
+	node.SetBaseOSRetryCounter(0)
+	node.SetBaseOSVersion("")
+	node.SetBaseOSActivate(false)
+	node.SetNetworkInstanceConfig(nil)
+	node.SetVolumeConfigs(nil)
+	node.SetSerial(vars.EveSerial)
+	node.SetOnboardKey(vars.EveCert)
+	node.SetDevModel(vars.DevModel)
+	node.SetGlobalProfile("")
+	node.SetLocalProfileServer("")
+	return cloud.OnBoardDev(node)
+}
+
+// OnBoardDev in controller
 func (cloud *CloudCtx) OnBoardDev(node *device.Ctx) error {
 	edenDir, err := utils.DefaultEdenDir()
 	if err != nil {
@@ -56,7 +74,7 @@ func (cloud *CloudCtx) OnBoardDev(node *device.Ctx) error {
 	alreadyRegistered := false
 	oldDevUUID, _ := cloud.DeviceGetByOnboard(node.GetOnboardKey())
 	if oldDevUUID != uuid.Nil {
-		b, err := ioutil.ReadFile(node.GetOnboardKey())
+		b, err := os.ReadFile(node.GetOnboardKey())
 		switch {
 		case err != nil && os.IsNotExist(err):
 			log.Printf("cert file %s does not exist", node.GetOnboardKey())
@@ -103,10 +121,15 @@ func (cloud *CloudCtx) OnBoardDev(node *device.Ctx) error {
 			node.SetRemote(cloud.vars.EveRemote)
 			node.SetRemoteAddr(cloud.vars.EveRemoteAddr)
 			if !alreadyRegistered { //new node
-				node.SetConfigItem("timer.config.interval", "5")
-				node.SetConfigItem("timer.metric.interval", "10")
+				node.SetConfigItem("timer.config.interval", "10")
+				node.SetConfigItem("timer.location.app.interval", "10")
+				node.SetConfigItem("timer.location.cloud.interval", "300")
 				node.SetConfigItem("app.allow.vnc", "true")
 				node.SetConfigItem("newlog.allow.fastupload", "true")
+				node.SetConfigItem("timer.download.retry", "60")
+				node.SetConfigItem("debug.enable.console", "true")
+				// TODO: allow to enable/disable:
+				//node.SetConfigItem("network.fallback.any.eth", "disabled")
 				log.Debugf("will apply devModel %s", node.GetDevModel())
 				deviceModel, err := models.GetDevModelByName(node.GetDevModel())
 				if err != nil {
@@ -127,7 +150,7 @@ func (cloud *CloudCtx) OnBoardDev(node *device.Ctx) error {
 					node.SetConfigItem("debug.default.loglevel", cloud.vars.LogLevel)
 				}
 				if cloud.vars.SSHKey != "" {
-					b, err := ioutil.ReadFile(cloud.vars.SSHKey)
+					b, err := os.ReadFile(cloud.vars.SSHKey)
 					switch {
 					case err != nil && os.IsNotExist(err):
 						return fmt.Errorf("sshKey file %s does not exist", cloud.vars.SSHKey)
@@ -142,6 +165,10 @@ func (cloud *CloudCtx) OnBoardDev(node *device.Ctx) error {
 				if err = cloud.ConfigSync(node); err != nil {
 					log.Fatal(err)
 				}
+				// wait for certs
+				if _, err = cloud.GetECDHCert(node.GetID()); err != nil {
+					log.Fatal(err)
+				}
 			}
 			return nil
 		}
@@ -149,10 +176,10 @@ func (cloud *CloudCtx) OnBoardDev(node *device.Ctx) error {
 	return fmt.Errorf("onboarding timeout. You may try to run 'eden eve onboard' command again in several minutes. If not successful see logs of adam/eve")
 }
 
-//VersionIncrement use []byte with config.EdgeDevConfig and increment config version
+// VersionIncrement use []byte with config.EdgeDevConfig and increment config version
 func VersionIncrement(configOld []byte) ([]byte, error) {
 	var deviceConfig config.EdgeDevConfig
-	if err := json.Unmarshal(configOld, &deviceConfig); err != nil {
+	if err := proto.Unmarshal(configOld, &deviceConfig); err != nil {
 		return nil, fmt.Errorf("unmarshal error: %s", err)
 	}
 	existingID := deviceConfig.Id
@@ -181,5 +208,5 @@ func VersionIncrement(configOld []byte) ([]byte, error) {
 		}
 	}
 	log.Debugf("VersionIncrement %d->%s", oldVersion, deviceConfig.Id.Version)
-	return json.Marshal(&deviceConfig)
+	return proto.Marshal(&deviceConfig)
 }

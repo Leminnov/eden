@@ -2,20 +2,21 @@ package cachers
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/go-redis/redis/v7"
-	"github.com/golang/protobuf/ptypes/timestamp"
+	"github.com/go-redis/redis/v9"
 	"github.com/lf-edge/eden/pkg/controller/types"
-	"github.com/lf-edge/eve/api/go/info"
-	"github.com/lf-edge/eve/api/go/logs"
-	"github.com/lf-edge/eve/api/go/metrics"
+	"github.com/lf-edge/eve-api/go/info"
+	"github.com/lf-edge/eve-api/go/logs"
+	"github.com/lf-edge/eve-api/go/metrics"
 	uuid "github.com/satori/go.uuid"
 	log "github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-//RedisCache object provides caching objects from controller into redis
+// RedisCache object provides caching objects from controller into redis
 type RedisCache struct {
 	addr          string
 	password      string
@@ -24,7 +25,7 @@ type RedisCache struct {
 	client        *redis.Client
 }
 
-//NewRedisCache creates new RedisCache with provided settings
+// NewRedisCache creates new RedisCache with provided settings
 func NewRedisCache(addr string, password string, databaseID int, streamGetters types.StreamGetters) *RedisCache {
 	return &RedisCache{
 		addr:          addr,
@@ -40,11 +41,11 @@ func (cacher *RedisCache) newRedisClient() (*redis.Client, error) {
 		Password: cacher.password,
 		DB:       cacher.databaseID,
 	})
-	_, err := client.Ping().Result()
+	_, err := client.Ping(context.Background()).Result()
 	return client, err
 }
 
-//CheckAndSave process LoaderObjectType from data
+// CheckAndSave process LoaderObjectType from data
 func (cacher *RedisCache) CheckAndSave(devUUID uuid.UUID, typeToProcess types.LoaderObjectType, data []byte) (err error) {
 	if cacher.client == nil {
 		if cacher.client, err = cacher.newRedisClient(); err != nil {
@@ -53,7 +54,7 @@ func (cacher *RedisCache) CheckAndSave(devUUID uuid.UUID, typeToProcess types.Lo
 	}
 
 	var streamToWrite string
-	var itemTimeStamp *timestamp.Timestamp
+	var itemTimeStamp *timestamppb.Timestamp
 	var buf bytes.Buffer
 	buf.Write(data)
 	switch typeToProcess {
@@ -81,7 +82,7 @@ func (cacher *RedisCache) CheckAndSave(devUUID uuid.UUID, typeToProcess types.Lo
 	default:
 		return fmt.Errorf("not implemented type %d", typeToProcess)
 	}
-	rr, err := cacher.client.XRange(streamToWrite, "-", "+").Result()
+	rr, err := cacher.client.XRange(context.Background(), streamToWrite, "-", "+").Result()
 	if err != nil {
 		return err
 	}
@@ -112,7 +113,7 @@ func (cacher *RedisCache) CheckAndSave(devUUID uuid.UUID, typeToProcess types.Lo
 		}
 	}
 
-	strCMD := cacher.client.XAdd(&redis.XAddArgs{
+	strCMD := cacher.client.XAdd(context.Background(), &redis.XAddArgs{
 		Stream: streamToWrite,
 		Values: map[string]interface{}{
 			"object": data,

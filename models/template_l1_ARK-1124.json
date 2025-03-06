@@ -20,9 +20,8 @@
         "PciLong": "0000:01:00.0"
       },
       "logicallabel": "eth0",
-      "usagePolicy": {
-        "freeUplink": true
-      }
+      "cost": 0,
+      "usagePolicy": {}
     },
     {
       "ztype": 1,
@@ -33,9 +32,8 @@
         "PciLong": "0000:03:00.0"
       },
       "logicallabel": "eth1",
-      "usagePolicy": {
-        "freeUplink": true
-      }
+      "cost": 0,
+      "usagePolicy": {}
     },
     {
       "ztype": 2,

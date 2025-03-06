@@ -4,100 +4,86 @@
 package cmd
 
 import (
-	"fmt"
-	"io"
-	"os"
+	"reflect"
 
 	"github.com/lf-edge/eden/pkg/defaults"
-	"github.com/lf-edge/eden/pkg/utils"
+	"github.com/lf-edge/eden/pkg/openevec"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
-var verbosity string
-var configName string
-var configFile string
+var openEVEC *openevec.OpenEVEC
 
-var rootCmd = &cobra.Command{Use: "eden", PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-	configNameEnv := os.Getenv(defaults.DefaultConfigEnv)
-	if configNameEnv != "" {
-		configName = configNameEnv
-	}
-	configFile = utils.GetConfig(configName)
-	if verbosity == "debug" {
-		fmt.Println("configName: ", configName)
-		fmt.Println("configFile: ", configFile)
-	}
-	return setUpLogs(os.Stdout, verbosity)
-}}
+func NewEdenCommand() *cobra.Command {
+	var configName, verbosity string
+	cfg := &openevec.EdenSetupArgs{}
 
-func setUpLogs(out io.Writer, level string) error {
-	log.SetOutput(out)
-	lvl, err := log.ParseLevel(level)
-	if err != nil {
-		return err
+	rootCmd := &cobra.Command{
+		Use:               "eden",
+		PersistentPreRunE: preRunViperLoadFunction(cfg, &configName, &verbosity),
 	}
-	log.SetLevel(lvl)
-	return nil
+
+	groups := CommandGroups{
+		{
+			Message: "Basic Commands",
+			Commands: []*cobra.Command{
+				newSetupCmd(&configName, &verbosity),
+				newStartCmd(&configName, &verbosity),
+				newEveCmd(&configName, &verbosity),
+				newPodCmd(&configName, &verbosity),
+				newStatusCmd(&configName, &verbosity),
+				newStopCmd(&configName, &verbosity),
+				newCleanCmd(&configName, &verbosity),
+				newConfigCmd(&configName, &verbosity),
+				newSdnCmd(&configName, &verbosity),
+			},
+		},
+		{
+			Message: "Advanced Commands",
+			Commands: []*cobra.Command{
+				newInfoCmd(),
+				newLogCmd(),
+				newNetStatCmd(&configName, &verbosity),
+				newMetricCmd(&configName, &verbosity),
+				newAdamCmd(&configName, &verbosity),
+				newRegistryCmd(&configName, &verbosity),
+				newRedisCmd(&configName, &verbosity),
+				newEserverCmd(&configName, &verbosity),
+				newTestCmd(&configName, &verbosity),
+				newUtilsCmd(&configName, &verbosity),
+				newControllerCmd(&configName, &verbosity),
+				newNetworkCmd(),
+				newVolumeCmd(&configName, &verbosity),
+				newDisksCmd(),
+				newPacketCmd(&configName, &verbosity),
+				newRolCmd(&configName, &verbosity),
+			},
+		},
+	}
+
+	groups.AddTo(rootCmd)
+
+	rootCmd.PersistentFlags().StringVar(&configName, "config", defaults.DefaultContext, "Name of config")
+	rootCmd.PersistentFlags().StringVarP(&verbosity, "verbosity", "v", log.InfoLevel.String(), "Log level (debug, info, warn, error, fatal, panic")
+
+	return rootCmd
 }
 
-func assignCobraToViper(cmd *cobra.Command) {
-	for k, v := range defaults.DefaultCobraToViper {
-		if flag := cmd.Flag(v); flag != nil {
-			_ = viper.BindPFlag(k, flag)
+func preRunViperLoadFunction(cfg *openevec.EdenSetupArgs, configName, verbosity *string) func(cmd *cobra.Command, args []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		viperCfg, err := openevec.FromViper(*configName, *verbosity)
+		if err != nil {
+			return err
 		}
+		openevec.Merge(reflect.ValueOf(viperCfg).Elem(), reflect.ValueOf(*cfg), cmd.Flags())
+		*cfg = *viperCfg
+		openEVEC = openevec.CreateOpenEVEC(cfg)
+		return nil
 	}
-}
-
-func init() {
-	rootCmd.AddCommand(infoCmd)
-	infoInit()
-	rootCmd.AddCommand(logCmd)
-	logInit()
-	rootCmd.AddCommand(metricCmd)
-	metricInit()
-	rootCmd.AddCommand(startCmd)
-	startInit()
-	rootCmd.AddCommand(stopCmd)
-	stopInit()
-	rootCmd.AddCommand(statusCmd)
-	statusInit()
-	rootCmd.AddCommand(eveCmd)
-	eveInit()
-	rootCmd.AddCommand(adamCmd)
-	adamInit()
-	rootCmd.AddCommand(registryCmd)
-	registryInit()
-	rootCmd.AddCommand(redisCmd)
-	redisInit()
-	rootCmd.AddCommand(eserverCmd)
-	eserverInit()
-	rootCmd.AddCommand(configCmd)
-	configInit()
-	rootCmd.AddCommand(cleanCmd)
-	cleanInit()
-	rootCmd.AddCommand(setupCmd)
-	setupInit()
-	rootCmd.AddCommand(testCmd)
-	testInit()
-	rootCmd.AddCommand(utilsCmd)
-	utilsInit()
-	rootCmd.AddCommand(controllerCmd)
-	controllerInit()
-	rootCmd.AddCommand(podCmd)
-	podInit()
-	eciInit()
-	rootCmd.AddCommand(networkCmd)
-	networkInit()
-	exportImportInit()
-	rootCmd.AddCommand(volumeCmd)
-	volumeInit()
 }
 
 // Execute primary function for cobra
 func Execute() {
-	rootCmd.PersistentFlags().StringVar(&configName, "config", defaults.DefaultContext, "Name of config")
-	rootCmd.PersistentFlags().StringVarP(&verbosity, "verbosity", "v", log.InfoLevel.String(), "Log level (debug, info, warn, error, fatal, panic")
+	rootCmd := NewEdenCommand()
 	_ = rootCmd.Execute()
 }
